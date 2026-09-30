@@ -1,0 +1,585 @@
+﻿Cassandra Career Pipeline Architecture
+https://gemini.google.com/app/803e6b6ff536eded
+
+
+User prompt: Multi Tenant Event Driven Data pipeline for career page with Cassandra as DB
+Response: Designing a multi-tenant, event-driven data pipeline for a career page SaaS platform (like Greenhouse or Lever) requires balancing high-throughput write availability, tenant data isolation, sub-second query latency, and flexible stream processing.
+Here is an end-to-end architecture tailored for this workload using Apache Cassandra as the primary store.
+1. High-Level Architecture Overview
+[ Career Page Frontend / API ]
+           │
+           ▼ (HTTP REST / Webhooks)
+┌──────────────────────────────────────┐
+│       API Ingestion Gateway         │
+│  (Auth, Rate Limiting, Tenant Auth) │
+└──────────────────┬──────────────────┘
+                  │
+                  ▼ (Publish Events)
+┌──────────────────────────────────────┐
+│        Event Bus (Apache Kafka)      │
+│  Partitions: tenant_id hash key      │
+└──────────────────┬──────────────────┘
+                  │
+                  ▼ (Stream Processing)
+┌──────────────────────────────────────┐
+│  Stream Processor (Flink / Spark)    │
+│  - Resume Parsing, Analytics, PII    │
+└──────────────────┬──────────────────┘
+                  │
+                  ▼ (Batch / Async Writes)
+┌──────────────────────────────────────┐
+│   Cassandra Sink / Data Access Layer │
+└──────────────────┬──────────────────┘
+                  │
+                  ▼
+┌──────────────────────────────────────┐
+│     Apache Cassandra Cluster         │
+│   (Partitioned by tenant_id)         │
+└──────────────────────────────────────┘
+
+2. Multi-Tenancy Strategy in Apache Cassandra
+In Cassandra, table metadata (Memtables, Bloom filters, SSTable indexes) overhead grows with every table created. A cluster generally suffers performance degradation past 200–500 total tables across all keyspaces.
+Multi-Tenancy Pattern Matrix
+
+
+Strategy
+	Design
+	Pros
+	Cons
+	Ideal For
+	Discriminator Column (Shared Table)
+	Include tenant_id as the primary component of the Partition Key.
+	Max table efficiency; scales to millions of tenants; uniform cluster management.
+	Requires software-level tenant isolation checks on every CQL query.
+	SMB and Self-Serve Tenants.
+	Keyspace per Tenant
+	Separate Keyspace per tenant (e.g., company_a_career, company_b_career).
+	Granular backup/restore; tenant-specific replication strategies.
+	Hard limit on tenant count (~100–200 per cluster) due to metadata overhead.
+	Tier-1 Enterprise / Dedicated SaaS.
+	Hybrid Model (Recommended)
+	Shared tables for Standard/SMB tenants; dedicated keyspaces or clusters for Enterprise.
+	Balance between cost-efficiency and compliance isolation.
+	High-growth enterprise platforms.
+	
+
+	3. Cassandra Data Schema Design
+Career page data is inherently query-centric. Cassandra schema must be designed around query access patterns, not relational normalization.
+A. Job Postings Table
+Stores live and historical job postings.
+CREATE KEYSPACE career_page
+WITH replication = {
+   'class': 'NetworkTopologyStrategy', 
+   'us-east-1': 3, 
+   'eu-central-1': 3
+};
+
+CREATE TABLE career_page.jobs_by_tenant (
+   tenant_id uuid,
+   status text, -- 'ACTIVE', 'DRAFT', 'ARCHIVED'
+   job_id timeuuid,
+   title text,
+   department text,
+   location text,
+   job_type text, -- 'FULL_TIME', 'REMOTE'
+   description text,
+   created_at timestamp,
+   PRIMARY KEY ((tenant_id, status), job_id)
+) WITH CLUSTERING ORDER BY (job_id DESC);
+
+B. Candidate Applications Table (Partitioned by Tenant & Job)
+Prevents partition hotspots by grouping applications under (tenant_id, job_id).
+CREATE TABLE career_page.applications (
+   tenant_id uuid,
+   job_id timeuuid,
+   application_id timeuuid,
+   candidate_email text,
+   candidate_name text,
+   resume_url text,
+   current_stage text, -- 'APPLIED', 'SCREENING', 'INTERVIEW', 'HIRED'
+   parsed_skills set<text>,
+   submitted_at timestamp,
+   PRIMARY KEY ((tenant_id, job_id), application_id)
+) WITH CLUSTERING ORDER BY (application_id DESC);
+
+C. Application Event Audit / Time-Series (Career Page Analytics)
+Tracks candidate application interactions, views, and state changes chronologically.
+CREATE TABLE career_page.application_events (
+   tenant_id uuid,
+   year_month text, -- e.g., '2026-09' to cap partition size
+   event_id timeuuid,
+   application_id timeuuid,
+   event_type text, -- 'PAGE_VIEW', 'FORM_START', 'RESUME_UPLOAD', 'SUBMITTED'
+   metadata map<text, text>,
+   created_at timestamp,
+   PRIMARY KEY ((tenant_id, year_month), event_id)
+) WITH CLUSTERING ORDER BY (event_id DESC);
+
+4. Event-Driven Pipeline Architecture
+[ Frontend Event ]
+      │
+      ▼
+[ API Gateway ]  ── validation & schema check ──► [ Kafka Ingestion Topic ]
+                                                         │
+                                        ┌────────────────┴────────────────┐
+                                        ▼                                 ▼
+                              [ Real-time Analytics ]          [ Async Application Processor ]
+                              (Flink Streaming Job)            (Enrichment, Parsing, Cassandra)
+
+1. Ingestion Layer
+* API Gateway: Validates tenant JWT tokens, extracts tenant_id, and enforces rate limits using a Token Bucket algorithm per tenant.
+* Schema Validation: Ensures incoming JSON conforms to CloudEvents standards (specifying tenant_id, event_type, and timestamp).
+2. Event Bus Design (Apache Kafka)
+* Topic Naming Convention: career.events.<environment>.<event_type> (e.g., career.events.prod.application-submitted).
+* Partition Strategy: Message Key set to tenant_id.
+   * Why: Guarantees strict order of operations for a specific tenant while parallelizing processing across Kafka brokers.
+3. Stream Processing Layer (Apache Flink / Spark Streaming)
+The stream processor handles distinct pipelines:
+1. Short-path Pipeline (Cassandra Sink): Writes raw application records and job state changes directly to Cassandra.
+2. Enrichment Pipeline:
+   * Decouples heavy AI/ML resume parsing via worker queues.
+   * Emits resume.parsed events back into Kafka once finished.
+   * Updates parsed_skills in Cassandra asynchronously.
+3. Analytics Aggregator Pipeline:
+   * Computes tumbling/sliding window metrics (e.g., Job Views in last 1 hour, Drop-off rate at resume upload).
+   * Writes materialized aggregated stats directly to Cassandra query tables.
+5. Key Resilience & Operational Strategies
+A. Preventing Hot Partition Issues
+Large enterprise tenants generate exponentially higher traffic during hiring drives than SMBs.
+* Bucketization: For high-volume log or audit tables, concatenate a temporal bucket (YYYY-MM or YYYY-MM-DD) to the partition key (e.g., PRIMARY KEY ((tenant_id, year_month), event_id)).
+* Partition Size Boundary: Aim to keep Cassandra partitions under 100 MB or fewer than 100,000 rows.
+B. Consistency Level Selection
+Career pages are heavily write-heavy on applications and read-heavy on job descriptions.
+* Application Submissions: LOCAL_QUORUM for both reads and writes to guarantee immediate consistency across local data centers without incurring cross-region network latency.
+* Job Postings (Public Browsing): Write with LOCAL_QUORUM, Read with LOCAL_ONE backed by Redis/CDN caching at the API edge.
+C. Tenant Isolation & Security
+* Data Access Layer (DAL): Never allow raw CQL queries directly from microservices. All interactions must pass through an abstracted Data Access Layer that automatically injects tenant_id into the WHERE clause.
+* Row-Level Security: Implement strict RBAC in application software to prevent tenant A from executing queries without their tenant_id bound to the partition key.
+Suggested Next Steps
+To refine this architecture for your specific build:
+________________
+
+
+User prompt: It has to capture the event 1.(clicking on a job posting) 2. While in between applying for a job, can we select save and apply later. 3. Saving the Job(The job listing in the wishlist) 4. When click on apply, we'll get similar jobs as the recommendation. 5. It should also monitor how the user reaches the job application, in the career portal like from search or from similar jobs recommendations. 6. It should also know that whether if it's a call from web app, a phone application, or another third party backend service. 7. We should know which user signs up/logs in and if he returns to the page to apply for other jobs(frequent visitors) 8. We should also know how many jobs a user is applying. 9. While applying inbetween for a job, timestamps also should be considered saying when a person starts applying (basically after clicking to apply)and when he leaves the page, like at which steps he leaves the page or choosee "save and apply later" option. 10. We should also observe if the user chooses to fill every field manually or if he's auto filling via his resume Other than that, the metadata of the event should have 1. UserName/UserID 2. Email 3. Phone Number. 4. Alternate Phone Number. 5. Gender 6. Fresher/ Experience(then how many) 7. Education(degree/branch) 8. Job ID And other data it should have is 1. Type of Event Happening. 2. TimeStamp 3. Career Site ID 4. source(app or web) 5. Referrer(basically third party webhook)
+Response: To support detailed candidate behavior tracking, attribution, form drop-off analytics, and rich demographic metadata across multiple clients, the pipeline requires a standardized event schema, stateful stream processing for session tracking, and query-optimized Cassandra schemas.
+1. Unified Event Schema Specification
+Every event emitted from web apps, mobile apps, or third-party webhooks conforms to a single JSON payload contract.
+{
+ "event_header": {
+   "event_id": "a3bb189e-8bf9-3888-9912-ace4e6543001",
+   "event_type": "APPLICATION_STEP_COMPLETED", 
+   "timestamp": "2026-09-30T14:43:09.123Z",
+   "career_site_id": "tenant_acme_corp_8921",
+   "source_channel": "WEB_APP", 
+   "client_metadata": {
+     "user_agent": "Mozilla/5.0...",
+     "app_version": "v2.4.0",
+     "ip_address": "192.0.2.1"
+   },
+   "attribution": {
+     "referrer_type": "RECOMMENDATION", 
+     "referrer_url": "https://careers.acme.com/jobs/1234/similar",
+     "utm_source": "linkedin",
+     "utm_medium": "cpc"
+   }
+ },
+ "candidate_metadata": {
+   "user_id": "usr_992182741",
+   "user_name": "Siddharth Mishra",
+   "email": "siddharth@example.com",
+   "phone_number": "+919876543210",
+   "alternate_phone_number": "+919876543211",
+   "gender": "MALE",
+   "experience_level": {
+     "status": "EXPERIENCED",
+     "years_of_experience": 3.5
+   },
+   "education": {
+     "degree": "B.Tech / M.Sc Dual",
+     "branch": "Electrical & Electronics / Mathematics"
+   }
+ },
+ "event_payload": {
+   "job_id": "job_88320491",
+   "session_id": "sess_8839201923",
+   "action_details": {
+     "step_number": 2,
+     "step_name": "WORK_EXPERIENCE",
+     "action": "SAVE_AND_APPLY_LATER", 
+     "completion_method": "RESUME_AUTOFILL", 
+     "time_spent_on_step_ms": 42500,
+     "total_application_duration_ms": 112000
+   },
+   "recommendation_context": {
+     "triggered_recommendation": true,
+     "recommended_job_ids": ["job_88320492", "job_88320495"]
+   }
+ }
+}
+
+Supported Event Types (event_header.event_type)
+* JOB_VIEWED: Clicked on a job posting.
+* JOB_WISHLISTED: Saved job to wishlist.
+* APPLICATION_STARTED: Clicked "Apply Now".
+* APPLICATION_STEP_COMPLETED: Advanced to next field/page.
+* APPLICATION_DRAFT_SAVED: Selected "Save and Apply Later".
+* APPLICATION_SUBMITTED: Form submitted.
+* APPLICATION_ABANDONED: Left page/session timed out.
+* USER_REGISTERED / USER_LOGGED_IN: Authentication events.
+2. Cassandra Schema Design
+Cassandra requires query-first table modeling. Below are the specialized tables to support real-time analytics and user session flows.
+A. Candidate Profile & Activity Counters
+Tracks returning visitors, global application counts, and candidate demographics.
+-- Core profile snapshot
+CREATE TABLE career_page.candidate_profiles (
+   career_site_id text,
+   user_id text,
+   user_name text,
+   email text,
+   phone_number text,
+   alternate_phone text,
+   gender text,
+   experience_status text, -- 'FRESHER', 'EXPERIENCED'
+   years_of_experience decimal,
+   education_degree text,
+   education_branch text,
+   updated_at timestamp,
+   PRIMARY KEY ((career_site_id), user_id)
+);
+
+-- Real-time activity counter table for frequent visitor tracking
+CREATE TABLE career_page.candidate_activity_counters (
+   career_site_id text,
+   user_id text,
+   total_logins counter,
+   total_job_views counter,
+   total_applications_started counter,
+   total_applications_submitted counter,
+   PRIMARY KEY ((career_site_id), user_id)
+);
+
+B. Application Drop-off & Funnel Analytics
+Tracks form progression, timestamps, fill methods (MANUAL vs RESUME_AUTOFILL), and drop-offs per job.
+CREATE TABLE career_page.application_funnel_sessions (
+   career_site_id text,
+   job_id text,
+   session_id text,
+   event_timestamp timestamp,
+   user_id text,
+   event_type text, -- 'APPLICATION_STARTED', 'APPLICATION_DRAFT_SAVED', 'APPLICATION_ABANDONED'
+   last_completed_step int,
+   step_name text,
+   completion_method text, -- 'MANUAL', 'RESUME_AUTOFILL', 'HYBRID'
+   source_channel text, -- 'WEB_APP', 'MOBILE_APP', 'THIRD_PARTY_SERVICE'
+   referrer_type text, -- 'SEARCH', 'RECOMMENDATION', 'THIRD_PARTY_WEBHOOK', 'DIRECT'
+   time_spent_seconds int,
+   PRIMARY KEY ((career_site_id, job_id), session_id, event_timestamp)
+) WITH CLUSTERING ORDER BY (session_id ASC, event_timestamp DESC);
+
+C. Wishlists / Saved Jobs
+Tracks candidate wishlists per tenant.
+CREATE TABLE career_page.user_job_wishlists (
+   career_site_id text,
+   user_id text,
+   saved_at timestamp,
+   job_id text,
+   source_channel text,
+   PRIMARY KEY ((career_site_id, user_id), job_id)
+) WITH CLUSTERING ORDER BY job_id ASC;
+
+D. User Journey & Attribution Log
+Monitors the arrival path (e.g., search vs. recommendation engine vs. external webhook).
+CREATE TABLE career_page.candidate_journey_attribution (
+   career_site_id text,
+   year_month_day text, -- Partition key bucket: e.g., '2026-09-30'
+   event_time timestamp,
+   user_id text,
+   job_id text,
+   referrer_type text, -- 'SEARCH', 'RECOMMENDATION', 'THIRD_PARTY_WEBHOOK'
+   referrer_url text,
+   source_channel text, -- 'WEB_APP', 'MOBILE_APP', 'THIRD_PARTY'
+   event_type text,
+   PRIMARY KEY ((career_site_id, year_month_day), event_time, user_id)
+) WITH CLUSTERING ORDER BY event_time DESC, user_id ASC;
+
+3. End-to-End Event Pipeline Flow
+┌────────────────────────────────────────────────────────────────────────┐
+│                          Ingestion Gateway                             │
+│   (Web App / Mobile App / Third-Party Webhook API Endpoint)            │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                  │
+                                  ▼ (Validate Schema & Inject Headers)
+┌────────────────────────────────────────────────────────────────────────┐
+│                     Kafka Topic: career.events.raw                     │
+│               Partition Key: hash(career_site_id + user_id)            │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                  │
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     Apache Flink Stateful Stream                       │
+│  - Sessionization: Correlate APPLY_CLICKED -> STEP_LOGGED -> SUBMIT    │
+│  - Detect Form Abandonment (Watermark timeout on incomplete sessions)   │
+│  - Classify Completion Method: MANUAL vs RESUME_AUTOFILL               │
+└──────────────────┬──────────────────────────────────┬──────────────────┘
+                  │                                  │
+                  ▼ (Batch Async Writes)             ▼ (Trigger Engine)
+┌─────────────────────────────────────┐  ┌───────────────────────────────┐
+│       Apache Cassandra Cluster      │  │ Real-time Recommendation      │
+│  - Candidate Profiles               │  │ Engine (pushed on             │
+│  - Activity Counters                │  │ APPLY_CLICKED event)          │
+│  - Funnel & Journey Tables          │  └───────────────────────────────┘
+└─────────────────────────────────────┘
+
+Key Processing Mechanics
+1. Attribution & Source Identification:
+   * API Gateway inspects client headers (X-Source-Type: WEB_APP | MOBILE_APP | THIRD_PARTY) and incoming payload attribution.referrer_type.
+   * If referrer_type == "RECOMMENDATION", the pipeline links the event directly to the recommendation algorithm version ID.
+2. Sessionization & Drop-off Detection (Apache Flink):
+   * Flink groups events by (career_site_id, user_id, session_id) using a 30-minute session window.
+   * If an APPLICATION_STARTED event is received without an explicit APPLICATION_SUBMITTED or APPLICATION_DRAFT_SAVED within the window, Flink automatically emits an APPLICATION_ABANDONED synthetic event with the last recorded step_number.
+3. Autofill vs. Manual Field Detection:
+   * Frontend DOM listeners send event flags indicating whether inputs were modified via standard keystrokes (MANUAL) or injected via parser payload mapping (RESUME_AUTOFILL).
+4. Recommendation Workflow:
+   * Upon receiving event_type == "APPLICATION_STARTED", a light consumer reads the candidate's education and experience_level to immediately trigger a vectorized query returning top-N similar job recommendations back to the client.
+4. PII Security & Data Governance
+Because candidate metadata contains Sensitive Personally Identifiable Information (PII) such as phone numbers, email addresses, and gender:
+* Field-Level Encryption (FLE): Encrypt email, phone_number, and user_name at the API Gateway layer using AES-GCM before writing to Kafka or Cassandra.
+* Separation of Analytics & PII: Keep analytical tables (application_funnel_sessions) pseudo-anonymized using user_id. Restrict access to candidate_profiles using Cassandra Role-Based Access Control (RBAC).
+________________
+
+
+User prompt: Give me a full end to end architecture diagram of it
+Response: ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                       1. CLIENT & TOUCHPOINT LAYER                                      │
+│                                                                                                         │
+│   ┌───────────────────────────┐       ┌───────────────────────────┐       ┌──────────────────────────┐  │
+│   │    Web Career Portal      │       │     Mobile App Client     │       │  Third-Party / Webhooks  │  │
+│   │  - DOM Autofill Detectors │       │  - Native Mobile SDK      │       │  - Job Board Partners    │  │
+│   │  - Navigation Trackers    │       │  - Device Attribution     │       │  - API Ingest Clients    │  │
+│   └─────────────┬─────────────┘       └─────────────┬─────────────┘       └────────────┬─────────────┘  │
+└─────────────────┼───────────────────────────────────┼──────────────────────────────────┼────────────────┘
+                 │                                   │                                  │
+                 └───────────────────────────────────┼──────────────────────────────────┘
+                                                     │ HTTPS / TLS 1.3 (Unified JSON Payload)
+                                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                     2. EDGE & INGESTION GATEWAY                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ API Gateway (Kong / Envoy)                                                                        │  │
+│  │  ├── Auth & Tenant Validation: Decodes JWT, validates career_site_id                              │  │
+│  │  ├── Rate Limiter: Per-tenant Token Bucket (prevents enterprise tenant starvation)               │  │
+│  │  ├── Origin Inspection: Binds source_channel (WEB_APP | MOBILE_APP | THIRD_PARTY)                 │  │
+│  │  └── Security & PII: AES-GCM Field-Level Encryption on Name, Email, Phone, Gender                 │  │
+│  └──────────────────────────────────────────────────┬────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┼───────────────────────────────────────────────────┘
+                                                     │ Validated Event Stream
+                                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               3. EVENT BUS LAYER (APACHE KAFKA CLUSTER)                                 │
+│  Partitioning Strategy: Partition Key = hash(career_site_id + user_id) [Guarantees order per user]      │
+│  ┌───────────────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Topic: career.events.raw                                                                          │  │
+│  │ [ JOB_VIEWED | WISHLISTED | APPLY_CLICKED | DRAFT_SAVED | STEP_COMPLETED | SUBMITTED | LOGGED_IN ]   │  │
+│  └──────────────┬───────────────────────────────────┬───────────────────────────────────┬────────────┘  │
+└─────────────────┼───────────────────────────────────┼───────────────────────────────────┼───────────────┘
+                 │                                   │                                   │
+                 ▼                                   ▼                                   ▼
+┌───────────────────────────────────┐   ┌───────────────────────────────────┐   ┌─────────────────────────┐
+│     4A. REAL-TIME STREAMING       │   │    4B. RECOMMENDATION ENGINE      │   │   4C. CASSANDRA SINK    │
+│         (APACHE FLINK)            │   │         (VECTOR ENGINE)           │   │      (FAST WRITER)      │
+│ ├── Session State Manager         │   │ ├── Listens for APPLY_CLICKED     │   │ ├── Writes raw events   │
+│ │   (30-min window per session)   │   │ ├── Extracts Candidate Vector     │   │ │   directly to time-   │
+│ ├── Synthetic Drop-off Generator  │   │ │   (Education + Experience)      │   │ │   series log tables   │
+│ │   (Fired on session timeout)    │   │ ├── Performs Similarity Search    │   │ └── Async Batch         │
+│ └── Form Method Evaluator         │   │ └── Returns top-N similar job IDs │   │     In-Memory Buffer    │
+│     (MANUAL vs RESUME_AUTOFILL)   │   │     back to frontend context      │   │                         │
+└─────────────────┬─────────────────┘   └─────────────────┬─────────────────┘   └────────────┬────────────┘
+                 │                                       │                                  │
+                 └───────────────────────────────────────┼──────────────────────────────────┘
+                                                         │
+                                                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    5. PERSISTENCE & STORAGE LAYER                                       │
+│                                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ APACHE CASSANDRA CLUSTER (Partitioned by tenant: career_site_id)                                  │  │
+│  │  ├── candidate_profiles             (Metadata: PII, Gender, Experience, Education)                │  │
+│  │  ├── candidate_activity_counters    (Counters: Total Logins, Applications, Views)                │  │
+│  │  ├── application_funnel_sessions   (Session steps, timestamps, drop-offs, autofill vs manual)   │  │
+│  │  ├── user_job_wishlists             (Saved jobs per candidate)                                    │  │
+│  │  └── candidate_journey_attribution  (Referrer paths: Search vs Recs vs Webhooks)                  │  │
+│  └──────────────────────────────────────────────────┬────────────────────────────────────────────────┘  │
+│                                                     │                                                   │
+│  ┌────────────────────────────────────────┐         │         ┌──────────────────────────────────────┐  │
+│  │ REDIS CLUSTER                          │         │         │ VECTOR SEARCH DB (Milvus / Qdrant)   │  │
+│  │  ├── Active Session State (Drafts)     │◄────────┴────────►│  ├── Job Embeddings & Skill Index    │  │
+│  │  └── Cache for Frequently Viewed Jobs  │                   │  └── Real-time Recommendation Vectors│  │
+│  └────────────────────────────────────────┘                   └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                     ▲
+                                                     │ Query Path
+┌─────────────────────────────────────────────────────┴───────────────────────────────────────────────────┐
+│                                    6. SERVING & ANALYTICS LAYER                                         │
+│                                                                                                         │
+│  ┌────────────────────────────────────────┐                 ┌────────────────────────────────────────┐  │
+│  │ Candidate Web / Mobile API             │                 │ Recruiter / Tenant Analytics Portal    │  │
+│  │  ├── Draft State Retrieval             │                 │  ├── Form Drop-off Funnel Metrics      │  │
+│  │  ├── Wishlist Management               │                 │  ├── Traffic Source Attribution Graphs │  │
+│  │  └── Recommendation Payload Serving    │                 │  └── Autofill vs Manual Yield Ratios   │  │
+│  └────────────────────────────────────────┘                 └────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+Data Lifecycle & Component Interaction
+1. Ingestion & Origin Tracking
+* Clients include a lightweight tracker SDK. When a user interacts with a job posting, the client attaches system context (source_channel: WEB_APP, MOBILE_APP, THIRD_PARTY), referrer path (SEARCH, RECOMMENDATION, THIRD_PARTY_WEBHOOK), and input method flags (MANUAL vs RESUME_AUTOFILL).
+* API Gateway validates tenant authentication, applies field-level encryption (AES-GCM) to sensitive fields (email, phone_number, gender), and pushes the normalized event payload to Apache Kafka.
+2. Event Partitioning & Stream Processing
+* Kafka Partitioning: Messages are key-partitioned by hash(career_site_id + user_id). This guarantees chronological ordering for every action a user takes within a tenant portal.
+* Apache Flink Processing:
+   * Sessionization: Groups events into 30-minute sliding windows.
+   * Drop-off Detection: If an APPLY_CLICKED event is received without a corresponding SUBMITTED or DRAFT_SAVED action within the window timeout, Flink synthesizes an APPLICATION_ABANDONED event marked with the last completed step number and time spent.
+   * Autofill Ratio Metrics: Analyzes input completion tags to categorize whether an application was submitted via RESUME_AUTOFILL, MANUAL, or a HYBRID method.
+3. Real-Time Recommendation Pipeline
+* When an APPLY_CLICKED event reaches Kafka, the Recommendation Engine reads the candidate's profile vector (education degree/branch and experience level).
+* It executes a nearest-neighbor vector search against the Vector DB (e.g., Qdrant/Milvus) to fetch similar job IDs, returning recommendation options to the client API in real time.
+4. Cassandra Storage Layout
+Writes from Flink and the Kafka Sink flow directly into partitioned Cassandra tables:
+* candidate_profiles: Stores encrypted user metadata, gender, education, and years of experience.
+* candidate_activity_counters: Atomic counters tracking total logins, views, started applications, and completed applications.
+* application_funnel_sessions: Time-series log tracking step progression, time spent per step, and "Save and Apply Later" drafts.
+* candidate_journey_attribution: Logs the entry path of every applicant (e.g., external webhook vs internal search vs recommendation engine).
+________________
+
+
+User prompt: How is the event generator writing the data into the database, or say if the write request to database from queue failed, what should it do?
+Response: In an event-driven architecture, writing data from a message queue (Kafka) via a stream processor (Flink / Custom Consumer) to Apache Cassandra requires a balance between high write throughput and strict failure resiliency.
+1. How the Event Sink Writes Data to Cassandra
+Writing to Cassandra requires a different approach than writing to traditional relational databases. Connections must avoid heavy single transactions and cross-partition locking.
+┌─────────────────┐       ┌────────────────────────────────────────────────────────┐       ┌──────────────────┐
+│  Kafka Topic    │──────►│ Consumer / Flink Sink Worker                           │──────►│ Cassandra Cluster│
+│ (Partitioned)   │       │ - Prepared Statements                                  │       │ (Distributed)    │
+└─────────────────┘       │ - Partition-Aware Grouping (Unlogged Batches)          │       └──────────────────┘
+                         │ - Token-Aware Connection Pool                          │
+                         └────────────────────────────────────────────────────────┘
+
+A. Asynchronous Concurrent Writes & Connection Pooling
+* Token-Aware Routing: The Cassandra client driver (e.g., DataStax Driver) maintains a topology map of the cluster. It routes write requests directly to the coordinator node holding the specific career_site_id partition, eliminating inter-node network hops.
+* Prepared Statements: Statements like INSERT INTO application_funnel_sessions (...) are compiled once during startup. During writes, only the bound parameters are sent over the wire, saving CPU on both application and database nodes.
+* Async I/O (executeAsync): Rather than blocking thread by thread, consumers fire asynchronous CQL queries concurrently using non-blocking Netty I/O worker threads.
+B. Partition-Aware Batching
+* Avoid Logged Batches: Standard multi-partition LOGGED BATCH statements in Cassandra introduce severe coordinator overhead and performance degradation.
+* Partition-Grouped UNLOGGED BATCH: Events in memory are grouped strictly by (career_site_id, job_id). If multiple events belong to the same partition, they are flushed together in a single UNLOGGED BATCH. If they span multiple partitions, they are executed as concurrent asynchronous single-row writes.
+2. What Happens When a Write to Cassandra Fails?
+When a write fails (due to network blips, Cassandra node GC pauses, schema mismatches, or node failures), the pipeline executes a multi-tiered resilience strategy:
+                          ┌────────────────────────┐
+                         │  Execute Cassandra     │
+                         │        Write           │
+                         └───────────┬────────────┘
+                                     │
+                                     ▼
+                            [ Write Successful? ]
+                            /                   \
+                          YES                   NO
+                          /                       \
+                         ▼                         ▼
+           ┌────────────────────────┐   ┌───────────────────────────────────┐
+           │ Commit Kafka Offset    │   │ Is Error Transient?               │
+           │ (Acknowledge Message)  │   │ (WriteTimeout, Overloaded, Connection)
+           └────────────────────────┘   └─────────────────┬─────────────────┘
+                                                          │
+                                          ┌───────────────┴───────────────┐
+                                         YES                              NO
+                                          │                        (Schema Mismatch,
+                                          ▼                        Corrupted Payload)
+                           ┌────────────────────────────┐                 │
+                           │ Retry with Exponential     │                 │
+                           │ Backoff + Random Jitter    │                 │
+                           └──────────────┬─────────────┘                 │
+                                          │                               │
+                                 [ Max Retries Reached? ]                 │
+                                 /                      \                 │
+                               NO                        YES              │
+                              /                            \              │
+                             ▼                              ▼             ▼
+                   ┌───────────────────┐          ┌────────────────────────────────┐
+                   │ Retry Write Query │          │ Route to Dead Letter Queue     │
+                   └───────────────────┘          │ (Kafka: career.events.dlq)     │
+                                                  └───────────────┬────────────────┘
+                                                                  │
+                                                                  ▼
+                                                  ┌────────────────────────────────┐
+                                                  │ Commit Original Kafka Offset   │
+                                                  │ (Unblock Consumer Stream)      │
+                                                  └────────────────────────────────┘
+
+Step 1: Retry Strategy for Transient Errors
+Transient errors include WriteTimeoutException, UnavailableException, or OverloadedException.
+1. Driver-Level & Sink Retries: The consumer uses an Exponential Backoff with Jitter retry policy (e.g., initial wait 100ms, doubling up to 5 seconds with randomized delay to avoid thundering herd problems on recovering nodes).
+2. Consistency Level Downgrade (Fallback): If writing at LOCAL_QUORUM fails due to a node going down, high-priority time-series events can fall back to LOCAL_ONE to preserve write availability, flagging the record for later reconciliation.
+Step 2: Stream Backpressure & Offset Management
+To prevent data loss, message offsets in Kafka must not be committed until Cassandra explicitly acknowledges the write.
+1. At-Least-Once Delivery: The Kafka consumer fetches a batch of messages, writes them to Cassandra, and only then commits the offset back to Kafka.
+2. Flink Checkpointing: In a Flink pipeline, state and Kafka offsets are committed atomically via two-phase commit checkpoints.
+3. Backpressure Trigger: If Cassandra is overwhelmed and writes begin slowing down, the internal buffers in Flink/Consumer fill up. This automatically halts reading from Kafka, allowing Cassandra time to recover without dropping events.
+Step 3: Handling Non-Transient / Poison Pill Events (Dead Letter Queue)
+Non-transient errors (e.g., bad data types, invalid UUIDs, schema mismatches, or records exceeding maximum retry attempts) will never succeed no matter how many times they are retried. Blocking the consumer stream for these "poison pills" causes consumer lag.
+1. Dead Letter Queue (DLQ) Routing: When retries expire or a non-retryable exception is caught, the consumer wraps the failed event with error metadata and publishes it to a dedicated Kafka topic: career.events.dlq.
+2. DLQ Message Context:
+{
+ "original_payload": { ... },
+ "error_context": {
+   "exception_class": "InvalidQueryException",
+   "error_message": "Column 'unknown_field' declared in CQL statement does not exist",
+   "failed_at": "2026-09-30T14:52:00Z",
+   "retry_count": 5,
+   "original_topic": "career.events.raw",
+   "original_partition": 3,
+   "original_offset": 8849201
+ }
+}
+
+3. Unblocking the Pipeline: Once routed to the DLQ, the pipeline commits the original message's offset in the main topic and proceeds to the next event.
+4. DLQ Monitor & Replay Service: A dedicated alerting service notifies engineers of DLQ growth. Once schema fixes or code patches are deployed, a replay worker reads from career.events.dlq and re-injects events back into the main pipeline.
+Step 4: Guaranteeing Idempotency on Retries
+Because network timeouts can occur after Cassandra has written the data but before sending an ACK back to the client, retrying a write can result in executing the same CQL statement twice.
+To ensure retries do not corrupt state or cause duplicate counts:
+   1. Deterministic Primary Keys & TIMEUUID: Use client-side generated UUIDs/TIMEUUIDs (e.g., event_id or session_id) inside the primary key. Re-inserting the same row simply overwrites the exact cell idempotently without creating duplicates.
+   2. Explicit Timestamps (USING TIMESTAMP): Every INSERT statement attaches the event's original source timestamp (USING TIMESTAMP <event_timestamp_micros>). If an out-of-order or duplicate retry arrives, Cassandra's Last-Write-Wins (LWW) conflict resolution guarantees that the write with the higher timestamp persists correctly.
+   3. Separate Atomic Counters: Never mix status updates and counter updates in the same table. For metrics like total_job_views, route updates to a dedicated counter table in Cassandra or compute exact counts via stateful aggregation inside Flink before writing the result to Cassandra.
+________________
+
+
+User prompt: Okay, so there is a hackathon going on, the judge has divided the architecture into 5 parts, UI, Event Generator, Queue(2 people for queue), Database. What topic should I choose and build on?
+Response: If you want maximum impact during judging, go for Queue (Stream Processing & Pipeline) or Event Generator.
+Here is how the roles rank in terms of hackathon demo impact, technical depth, and ease of showing off cool architecture to judges.
+Option 1: Queue & Stream Processor (Highest Technical Impact)
+2 People Allocated — This is the core engine of the system.
+   * Why choose it: Judges love seeing live streaming systems handle edge cases. Since 2 people are assigned, you can divide this into Kafka Infrastructure/Resilience and Flink/Stream Processing Logic.
+   * What you should build:
+   1. Sessionization & Drop-off Detection: Build a Flink streaming job (or a fast worker in Python/Go/Rust) that uses a 30-minute sliding window to catch when a user clicks "Apply" but abandons the page without submitting.
+   2. Dead Letter Queue (DLQ) & Retries: Show what happens when a write fails—automatically route poison pills to a DLQ topic and demonstrate exponential backoff.
+   3. Real-time Counter Aggregation: Compute live application counts and streaming metrics in memory before flushing to the queue/sink.
+   * The "Judge Demo" Moment: Open a terminal showing live Kafka messages streaming in real time, block the database on purpose to show the queue holding backpressure without losing data, and show the DLQ catching corrupted payloads.
+Option 2: Event Generator / Ingestion Gateway (Highest Control over Architecture)
+1 Person — Controls the payload spec and ingestion contract.
+   * Why choose it: You get to design the data contract that everyone else depends on.
+   * What you should build:
+   1. Ingestion API Gateway: A fast lightweight API (FastAPI / Go / Axum) that receives events, validates schemas (JSON Schema), and enriches metadata (timestamps, IP/User-Agent parsing, client channel tags).
+   2. Field-Level Encryption: Encrypt sensitive candidate PII (email, phone number) on the fly before pushing to the queue.
+   3. Event SDK / Tracking Wrappers: Build helper utilities or DOM listeners that distinguish between explicit typing (MANUAL) and pasted/autofilled form values (RESUME_AUTOFILL).
+   * The "Judge Demo" Moment: Trigger a simulated user session sending 100 parallel events per second, showing raw vs. encrypted payloads in the gateway log with instant validation.
+Option 3: Database (Cassandra / Storage)
+1 Person — Sets up the data model and storage layer.
+   * Why choose it: Essential for proving system scalability, though slightly less dynamic during live presentation.
+   * What you should build:
+   1. Query-Driven Schema: Create optimized Cassandra tables partition-keyed by career_site_id (supporting candidate profiles, time-series funnel sessions, and atomic counters).
+   2. Data Access Layer (DAL): Write prepared statements for high-throughput batch writes and token-aware routing.
+   * The "Judge Demo" Moment: Run CQL queries live showing instant sub-millisecond retrieval of user journey logs and candidate activity counters across multi-tenant partitions.
+Option 4: UI
+1 Person — Visual presentation.
+   * Why choose it: Gives the project a polished surface area, though judges evaluating an "Event-Driven Data Pipeline" will focus heavily on backend telemetry.
+   * What you should build: A minimal candidate form with "Save & Apply Later", "Resume Autofill", and a live Recruiter Analytics Dashboard showing real-time drop-off charts.
+Final Recommendation
+If you prefer low-level systems, concurrent processing, and pipeline resilience, grab one of the Queue slots. You can own the Stream Processing & DLQ engine while your queue partner manages Kafka broker configuration and consumer group sinks.
+If you prefer API gateway design, security, and payload contracts, take the Event Generator.
+________________
