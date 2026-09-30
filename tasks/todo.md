@@ -1,58 +1,83 @@
 # Task List: Event Generator
 
-Plan: `tasks/plan.md` · Spec: `SPEC.txt` · **Revision r3.2** (post code review)
-**P0** = demo-critical · **P1** = high value · **P2** = cut if time-boxed
-**Never cut: T1, T2, T3, T6, T9, T10a, T11.**
+Plan: `tasks/plan.md` · Spec: `SPEC.txt` · **Revision r4** (demo posture settled)
+**P0** = required for the demo · **P1** = high value · **P2** = cut if time-boxed
 
-**Cut order** (re-ranked by return per hour lost): **T10b** → **shorten the 10-min soak to 3** →
-**T8b's 3rd payload shape → 1** → T7's fairness *demo* → T4's `X-Source-Type` hint validation.
+**Demo posture (r4):** the demo does **not** demonstrate 50k/sec. It demonstrates a working system
+and explains the architecture that would reach 50k. This task list is ordered around that.
 
-**Lean demo path (~35h):** T1 → T2 → T3 → T6 → T10a → T8a → T9 → T11.
-Skips T4 (dev-mode bypass with a loud warning), T5, T7's demo, T8b, T10b.
-**T7's rate limit itself stays even on the lean path** — it is the Python survival mechanism, not a feature.
+**Cut order:** T1r load client → T8c third injection knob → T9r A/B benchmark (keep the doc) →
+T10b polish on the live view. **Never cut: T3, T5b, T11, T10a.**
 
-**Environment:** load/soak testing in Docker on Linux; driver and gateway in separate containers with CPU
-limits. Dev on Windows is fine; the demo is not.
+**Environment:** the running system lives in **WSL2/Ubuntu** (Cassandra and Flink have no native
+Windows support, so the whole stack shares the laptop's 6 cores with Windows). Dev on Windows is fine.
+Gateway and driver in **separate containers with CPU limits**.
 
-**r3.2 note:** every task below now carries the review fixes. New/changed acceptance criteria are marked
-**[C#]**, **[H#]**, **[M#]** or **[G#]** against the plan's §0.1.
+**Status legend:** ✅ done · 🔄 in flight · ⬜ not started
+
+**r4 note:** acceptance criteria below carry the review fixes, marked **[C#] [H#] [M#] [G#]** against
+`plan.md` §0.1 of r3.2. Criteria that assumed a live 50k benchmark are marked **[r4: reduced]**.
+
+---
+
+## Progress
+
+| # | Task | Status | Tests | Commit |
+|---|---|---|---|---|
+| T0 | scaffold | ✅ | — | `4ce45c7` |
+| T2 | CloudEvents contract + ledger + spec amendment | ✅ | 32 | `4ce45c7` |
+| T4 | asymmetric auth, JWT-only tenant binding | ✅ | 50 | `096298f` |
+| T5a | validation + post-encryption DLQ | ✅ | 28 | `bd49eca` |
+| T6 | crypto: key separation, registry, AAD | ✅ | 37 | `6559943` |
+| T7 | per-tenant token bucket | ✅ | 31 | `365add2` |
+| T8a | driver funnel FSM + corpus | ✅ | 38 | `26e2d49` |
+| — | integration fixes from worker review | ✅ | +2 | `a40bf0a` |
+| T5b | ingest pipeline, handler, limits, decrypt | 🔄 | — | — |
+| T8b | 500-tenant skew, sharding, webhook source | 🔄 | — | — |
+| T10a | metrics registry | 🔄 | — | — |
+| T3 | FastAPI app, Kafka sink, compose | ⬜ | — | — |
+| T11 | verification oracle + chaos scripts | ⬜ | — | — |
+| T10b | live CLI view, inspector, Makefile | ⬜ | — | — |
+| T1r | load client | ⬜ | — | — |
+| T9r | producer-config doc | ⬜ | — | — |
+| T8c | injection knobs | ⬜ | — | — |
+
+**219 tests green at r4.**
+
 
 ---
 
 ## Phase 0: De-risk the load-bearing assumption
 
-### T1: Python throughput spike
+### T1r: Load client **[r4: reduced from the T1 throughput spike]**
 
-**Description:** Throwaway benchmark answering one question before we commit: on the **actual demo
-hardware**, how many events/sec can Python sustain through FastAPI + msgspec + 5-field AES-GCM, across batch
-sizes and worker counts? Every capacity decision depends on it.
+**Description:** ~~A throwaway benchmark deciding whether 50k/sec is reachable.~~ **Removed under the
+r4 demo posture** — we no longer need to know, and the 6-core laptop stops being a risk. What remains
+is a small, honest load client that shows the gateway holding a sustained rate, so the demo can say
+"here is it under load" without claiming a benchmark.
 
 **Acceptance criteria:**
-- [ ] Payload is a real **CloudEvents 1.0.3** batch (`application/cloudevents-batch+json`) including the
-      `sequence` and `keyversion` extensions — measure the true wire cost, not a proxy
-- [ ] Sweep batch sizes **1 / 10 / 20 / 50 / 100 / 500** × **1 / 4 / 8** workers
-- [ ] **A required minimum batch size is stated as a hard number**
-- [ ] **A measured ceiling is stated**, exceeding 50k with headroom (target ≥ 70k)
-- [ ] **Worker count N is produced here** — it is an *output* of this task, not a pre-committed decision
-      **[H6]**. r3.1 committed to "6-8 workers" in the Stack table while the batch floor was still
-      provisional; that was backwards
-- [ ] **Report `cores available to us`** after Kafka + Flink + Cassandra are accounted for **[H8]**. If
-      < 8 physical cores, the answer is *renegotiate the target*, not *add workers* **[H6]**
-- [ ] Comparison row: msgspec vs Pydantic vs pure-Python `jsonschema` — library choice must be
-      evidence-based, not opinion
-- [ ] **One JWT verification per batch** measured, confirming the §D2 win over per-event verification
-- [ ] uvloop + httptools on vs off, quantified
-- [ ] Load driven from a **separate container with a CPU limit** — never the same box
-- [ ] Decision note appended to `tasks/plan.md` §1: batch floor, N, ceiling, and whether the sidecar
-      fallback is needed — **decided, not deferred**
+- [ ] Drives N concurrent requests against `/v1/ingest` at a configurable target rate, using the
+      pre-generated corpus (replay mode — no event construction in the load path)
+- [ ] Reports achieved events/sec, req/sec, p50/p99 latency, error breakdown by status code
+- [ ] **Reports the measured per-event server cost** so the 50k design claim rests on a measurement
+- [ ] Batches are single-tenant and within the 500-event / 4 MiB caps
+- [ ] **Explicitly NOT a benchmark** — output says so, and reports the machine it ran on. Never
+      prints a number that could be mistaken for the 50k figure
+- [ ] Testable without a broker (stub sink) so the client's own arithmetic is covered
 
 **Verification:**
-- [ ] All sweep points report events/sec, req/sec, CPU%, p50/p99
-- [ ] `py-spy` / `cProfile` profile captured; top hot functions identified
-- [ ] Checkpoint: numbers written down before any production code is written
+- [ ] Runs against a stub sink; arithmetic (events/sec from batch counts) is unit-tested
+- [ ] Manual: a short run against the real gateway produces a plausible figure
 
-**Dependencies:** None. **Blocks everything.**
-**Files:** `spike/` (throwaway — delete after T3) · **Effort: 3-4h**
+**Dependencies:** T3
+**Files:** `bench/load.py`, `bench/test_load.py` · **Effort: 2-3h** · **First on the cut list**
+
+### ~~T1: Python throughput spike~~ — **CANCELLED at r4**
+
+Superseded by T1r. The measurement it existed to produce is no longer a decision input. The
+per-event cost it would have measured has since been measured directly by T6 (~55 µs total, ~42 µs
+of it the crypto facade), which is a better number because it is a component breakdown.
 
 ---
 
@@ -436,35 +461,34 @@ it, and T10 was first on the cut list** — r3.1's cut list deleted its own prer
 **Files:** `driver/tenants.py`, `driver/skew.py`, `driver/webhook_source.py`
 **Effort: 3-4h**
 
-### T9: Replay mode + peak 50k/s + ordering proof
+### T9r: Producer-config doc + ordering proof **[r4: reduced from "peak 50k/s"]**
 
-**Description:** The headline task. Acceptance is not a peak — it is a **held peak with zero loss, zero
-duplication, and a proven ordering guarantee.**
-
-- **Peak: 50,000 events/sec aggregate held ≥ 60s**
-- **Soak: ~50% rate for ≥ 10 min** — **cut candidate: shorten to 3 min, best return in the plan** **[M10]**
-- **Ceiling: measured max, must exceed 50k with headroom (target ≥ 70k)**
+**Description:** ~~Prove a 50,000 events/sec peak with a 10-minute soak.~~ **Reduced under the r4 demo
+posture** — the demo explains 50k as a design target rather than demonstrating it, so holding 50k on
+this 6-core laptop is neither possible with the full stack nor necessary. What survives is genuinely
+valuable: a **correct, fully-explicit, documented producer configuration** (which *is* part of the
+50k argument), an **empirical proof of the ordering guarantee**, and a **measured run showing the
+system holds under load**.
 
 **Acceptance criteria:**
 - [ ] Replay mode: near-zero CPU in the load path
-- [ ] **50,000 events/sec aggregate held ≥ 60s**, gateway CPU < 80% across all workers (measurable only
-      because **T10a landed** — r3.1 cut T10 first and T9 depends on it) **[H7]**
+- [ ] **A sustained load run at whatever rate this machine sustains**, reported honestly with the
+      machine spec attached. The number is whatever it is — it is NOT presented as 50k **[r4]**
 - [ ] **Zero lost events, zero duplicate `(source, id)`** vs the ground-truth ledger
-- [ ] **10-minute soak at ~25,000 events/sec** with no latency, memory, or error-rate creep
-- [ ] **Measured ceiling documented**, above 50k with headroom
 - [ ] **Latency stays bounded under overload** — throughput saturates, p99 does not run away
-- [ ] **[C1] Per-`(tenant, user)` ordering PROVEN end-to-end:** consume the topic and assert events for one
-      `(source, user)` arrive in `sequence` order at 50k/sec. **Sticky routing must be enabled for this to
+- [ ] **[C1] Per-`(tenant, user)` ordering PROVEN:** consume the topic and assert events for one
+      `(source, user)` arrive in `sequence` order. **Sticky routing must be enabled for this to
       pass** — the test is the guard, not a formality
-- [ ] **[C1] Ordering-violation counter from T10a reads zero**, and a control run **with sticky routing
-      disabled is expected to show violations** — proving we understand the guarantee we can offer
-- [ ] **[H8] A consumer runs throughout peak and soak. Max end-to-end lag is bounded and reported.** If
-      downstream cannot keep up, **the demo number is reduced, not the assertion**
+- [ ] **[C1] Ordering-violation counter from T10a reads zero**, and a control run **with sticky
+      routing disabled is expected to show violations** — proving we understand the guarantee we offer
+- [ ] **[H8] A consumer runs throughout. Max end-to-end lag is bounded and reported.** If downstream
+      cannot keep up, **the number is reduced, not the assertion**
 - [ ] Kafka producer configured **exactly per D11** — every value explicit, nothing "left to default"
-- [ ] **T9 prints the producer's EFFECTIVE configuration and asserts every key in the D11 table** **[H5]**
-- [ ] **`enable.idempotence=true` and `acks=all` confirmed in the effective config** before the run
-- [ ] **`delivery.timeout.ms=5000` and `queuing.strategy=fifo` confirmed** — without these, broker failure
-      surfaces after ~5 minutes with 15M events buffered in retry **[H5]**
+- [ ] **The producer's EFFECTIVE configuration is printed and asserted** against every key in the D11
+      table **[H5]** — requested config is not evidence, effective config is
+- [ ] **`enable.idempotence=true` and `acks=all` confirmed** before the run
+- [ ] **`delivery.timeout.ms=5000` and `queuing.strategy=fifo` confirmed** — without these, broker
+      failure surfaces after ~5 minutes with millions of events buffered in retry **[H5]**
 - [ ] **librdkafka configuration reference consulted** and any divergence from the Java-client values
       reconciled in `docs/kafka-producer-tuning.md` — r3.1 flagged this as unconsulted and never closed it
 - [ ] A/B: throughput and CPU at `compression.type=none` vs `zstd`, and 3 values of `batch.size`
@@ -489,15 +513,15 @@ duplication, and a proven ordering guarantee.**
 
 ---
 
-## Checkpoint C: Peak proven
-- [ ] 50,000 events/sec aggregate held ≥ 60s, zero loss, zero duplicate `(source, id)`
+## Checkpoint C: Load run + ordering proven
+- [ ] A sustained load run completed at the rate this machine sustains, reported honestly
+- [ ] Zero loss, zero duplicate `(source, id)` vs the ground-truth ledger
 - [ ] **Ordering proven, with the sticky-routing control run demonstrating the counterfactual** **[C1]**
 - [ ] **Effective Kafka config verified against every D11 key** **[H5]**
 - [ ] **End-to-end lag bounded and reported** **[H8]**
-- [ ] Soak clean; measured ceiling above 50k with headroom
 - [ ] Bounded latency under overload
 - [ ] Graceful shutdown verified
-- [ ] **HUMAN REVIEW — headline requirement met**
+- [ ] **HUMAN REVIEW**
 
 ---
 
@@ -573,6 +597,8 @@ that T10a carries the metrics T9 needs.
 - [ ] `make demo` + chaos script run clean from a fresh clone, inside the time limit
 - [ ] Open questions (plan §7) answered and the plan reflects them
 - [ ] End-to-end reconciliation: zero loss, zero duplicate `(source, id)`, ordering proven
+- [ ] **The 50k claim in the design write-up is honest** — measured per-event cost stated, and it is
+      clear the figure is a design target rather than a demonstrated result
 - [ ] **FINAL HUMAN REVIEW — ready to demo**
 
 ---
