@@ -40,11 +40,23 @@ advertisement. The UI SDK should flush at **≤ 200 events / ≤ 2 MiB** to leav
 | `401` | Missing / malformed / expired / bad-signature JWT |
 | `403` | Body `source` ≠ token tenant · multi-tenant batch · `partitionkey` mismatch |
 | `413` | Batch over 500 events or 4 MiB |
-| `429` + `Retry-After` | Per-tenant rate limit |
+| `429` + `Retry-After` | Tenant's event budget exhausted. **The whole batch is denied.** |
 | `503` + `Retry-After` | Producer buffer full, or broker unreachable |
 
 **Clients MUST retry on `503` and on connection reset, reusing the same event `id`.** Retries are
 idempotent under the dedup rule in §4.
+
+**Rate limiting is charged per event but denied per batch.** Each event in the batch costs one token
+from the tenant's bucket. If any event cannot be afforded, the **entire batch is refused with `429`**
+rather than partially accepted. Three reasons: a `429` is an HTTP request-level signal and a partial
+one is incoherent; the batch is a unit the client chose to send; and because `id` is stable, retrying
+the whole batch is free of duplicates. Partial acceptance would leave the client unable to tell
+whether the events it did not receive are rejected, deferred, or lost.
+
+**A `429` does NOT produce a DLQ entry.** A rate-limited batch was not poisoned — it will succeed on
+retry, so filing it in the DLQ would bury real poison events under retry noise. It is not silently
+dropped either: the client receives an explicit `429` and the ground-truth ledger in §11 records the
+events as sent-but-not-accepted, so reconciliation shows a shortfall rather than a loss.
 
 `202` deliberately does not mean "durably in Kafka". With a bounded in-memory buffer, a gateway killed
 mid-flight loses the un-acked window. That window is measured and reported in T11 Chaos 1 rather than
