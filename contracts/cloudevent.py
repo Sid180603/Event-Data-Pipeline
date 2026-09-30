@@ -39,7 +39,13 @@ CompletionMethod = Literal["MANUAL", "RESUME_AUTOFILL", "HYBRID"]
 #: PII arrives encrypted or pseudonymised. `user_id_pseudo` is an HMAC, never a
 #: raw identifier (plan D5). Plaintext fields do not exist in this struct at all,
 #: so they cannot be serialised by accident.
-class CandidateMetadata(msgspec.Struct, omit_defaults=True):
+#:
+#: `forbid_unknown_fields` is load-bearing: without it a client posting a
+#: plaintext `email` has it SILENTLY DROPPED at decode, and the event is then
+#: accepted carrying no email with nobody aware. Rejecting is the correct
+#: behaviour -- a loud failure the client can fix, per the additive-only
+#: versioning policy in CONTRACT.md.
+class CandidateMetadata(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True):
     user_id_pseudo: str
     email_hmac: str | None = None
     email_enc: str | None = None
@@ -53,7 +59,7 @@ class CandidateMetadata(msgspec.Struct, omit_defaults=True):
     education_branch: str | None = None
 
 
-class EventPayload(msgspec.Struct, omit_defaults=True):
+class EventPayload(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True):
     job_id: str
     session_id: str
     step_number: int | None = None
@@ -92,9 +98,11 @@ class CloudEvent(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True)
     sourcechannel: SourceChannel | None = None
     referrertype: ReferrerType | None = None
     completionmethod: CompletionMethod | None = None
-    #: Optional hint from the client. NEVER trusted: the gateway derives the real
-    #: Kafka key (plan C2). A value that disagrees with the derived key is a
-    #: 403, never honoured.
+    #: Accepted ONLY so a disagreeing client value can be detected and rejected
+    #: with 403. It is NEVER used for routing: the gateway derives the Kafka key
+    #: from the JWT and the pseudonymous user id (plan C2). The CloudEvents
+    #: partitioning extension itself notes the value "might change, or even be
+    #: removed" across hops -- a hint, not a guarantee.
     partitionkey: str | None = None
 
 

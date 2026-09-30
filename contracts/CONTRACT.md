@@ -22,15 +22,24 @@ Regenerate with `python -m contracts.gen_schema`; the test suite fails if it dri
 
 ### Limits — hard, enforced before allocation
 
+These are the **caps**. A request above either is refused with `413`.
+
 | Limit | Value | Violation |
 |---|---|---|
 | Events per batch | **500** | `413` |
 | Request body | **4 MiB** | `413` |
 | Event size, after encryption | **64 KiB** | rejected per-event → DLQ |
-| Ingress event size (plaintext) | **48 KiB** (provisional; T6 measures) | `413` |
+| Ingress event size (plaintext) | **48 KiB** (provisional; measured in T6 follow-up) | `413` |
 
 The CloudEvents HTTP binding expects a receiver to advertise its maximum batch size. These are that
-advertisement. The UI SDK should flush at **≤ 200 events / ≤ 2 MiB** to leave headroom.
+advertisement.
+
+> **Client guidance, not a cap:** the UI SDK should flush at **≤ 200 events / ≤ 2 MiB**. That is a
+> recommended operating point that leaves headroom below the 500 / 4 MiB ceiling. Sending 500 events
+> is legal and will not be refused.
+
+`app/config.py` is the single source of truth for both numbers (`MAX_EVENTS_PER_BATCH = 500`,
+`MAX_BATCH_BYTES = 4 MiB`).
 
 ## 2. Response semantics — read this before writing a client
 

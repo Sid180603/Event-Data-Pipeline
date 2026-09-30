@@ -124,6 +124,23 @@ def test_unknown_event_type_is_rejected():
         msgspec.json.decode(msgspec.json.encode(payload), type=list[CloudEvent])
 
 
+def test_plaintext_pii_field_in_candidate_is_rejected_not_dropped():
+    """Without forbid_unknown_fields a client posting data.candidate.email has
+    it silently dropped: the event is then accepted carrying no email and
+    nobody is aware. Rejecting is the fix -- a loud error the client can act on."""
+    payload = _example("job-viewed.json")[0]
+    payload["data"]["candidate"]["email"] = "senniel@example.com"
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.json.decode(msgspec.json.encode(payload), type=list[CloudEvent])
+
+
+def test_unknown_field_in_event_payload_is_rejected():
+    payload = _example("job-viewed.json")[0]
+    payload["data"]["event_payload"]["secret_note"] = "x"
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.json.decode(msgspec.json.encode(payload), type=list[CloudEvent])
+
+
 def test_underscored_attribute_in_envelope_fails_the_allowlist():
     payload = _example("job-viewed.json")[0]
     payload["career_site_id"] = "acme_8921"  # illegal extension name
