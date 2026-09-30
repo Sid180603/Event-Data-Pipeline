@@ -59,24 +59,45 @@ def career_site_id_from_source(source: str) -> str:
     return source.split("/", 2)[2]
 
 
+_PROBLEM_FIELD = {
+    "BAD_TIME": "$.time",
+    "BAD_SOURCE": "$.source",
+    "BAD_ID": "$.id",
+    "RAW_SUBJECT": "$.subject",
+}
+
+
+def envelope_problem(ev: CloudEvent) -> str | None:
+    """Return a safe problem CODE for the envelope, or None when it is valid.
+
+    Codes rather than messages: a rejection reason is written to the DLQ, and a
+    message built from the value (e.g. "time 'x' is not RFC 3339") would put the
+    offending value into a second Kafka topic.
+    """
+    if not _SOURCE_RE.match(ev.source):
+        return "BAD_SOURCE"
+    if not _RFC3339_RE.match(ev.time):
+        return "BAD_TIME"
+    if not ev.id:
+        return "BAD_ID"
+    if ev.type.endswith(("user-registered", "user-logged-in")):
+        if ev.subject and ev.subject.startswith(("usr_", "user_")):
+            return "RAW_SUBJECT"
+    return None
+
+
 def validate_envelope(ev: CloudEvent) -> None:
-    """Raise ValueError if the envelope breaks a prose CloudEvents rule."""
+    """Raise ValueError if the envelope breaks a prose CloudEvents rule.
+
+    The message names the code and the field, never the value.
+    """
     for name in SAFE_CONTEXT_ATTRS:
         if not is_valid_attribute_name(name):  # pragma: no cover - guards our own table
             raise ValueError(f"our attribute name {name!r} is invalid")
 
-    career_site_id_from_source(ev.source)
-
-    if not _RFC3339_RE.match(ev.time):
-        raise ValueError(f"time {ev.time!r} is not RFC 3339")
-
-    if not ev.id:
-        raise ValueError("id must be a non-empty string")
-
-    # H3: identity events must carry a pseudonymous subject.
-    if ev.type.endswith(("user-registered", "user-logged-in")):
-        if ev.subject and ev.subject.startswith(("usr_", "user_")):
-            raise ValueError("identity events must use a pseudonymous subject")
+    problem = envelope_problem(ev)
+    if problem:
+        raise ValueError(f"{problem} at {_PROBLEM_FIELD.get(problem, '$')}")
 
 
 def extra_attributes(raw: dict) -> set[str]:
