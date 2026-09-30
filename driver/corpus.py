@@ -139,7 +139,7 @@ class CorpusBuilder:
                             source=ev["source"],
                             type=ev["type"],
                             tenant=ev["source"].rsplit("/", 1)[-1],
-                            user_pseudo=ev["data"]["candidate"]["user_id_pseudo"],
+                            user_pseudo=ev["data"]["candidate"]["user_id"],
                             seq=int(ev["sequence"]),
                         )
                     )

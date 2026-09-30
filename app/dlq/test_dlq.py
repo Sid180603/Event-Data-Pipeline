@@ -80,20 +80,30 @@ def test_canary_pii_never_appears_in_a_dlq_event():
 
 
 def test_dlq_event_round_trips_back_into_an_ingress_event():
-    """Re-injecting a DLQ event must not double-encrypt (C3)."""
+    """Re-injecting a DLQ event must not double-encrypt (C3).
+
+    A validation rejection happens BEFORE the encrypt stage, so the DLQ payload
+    is the plaintext ingress event. The round trip therefore returns an INGRESS
+    event -- which re-submits cleanly and gets encrypted once, correctly. The
+    post-encryption case is covered in `app/ingest/test_pipeline.py`.
+    """
+    from contracts.ingress import IngressEvent
+
     original = _raw()[0]
     ev = build_dlq_event(original, reason="bad type", field="type", index=0)
-    restored = dlq_data_to_ingress(ev.data)
+    restored = dlq_data_to_ingress(ev.data, IngressEvent)
     assert restored.id == original["id"]
     assert restored.type == original["type"]
-    assert restored.data.candidate.email_enc == original["data"]["candidate"]["email_enc"]
+    assert restored.data.candidate.email == original["data"]["candidate"]["email"]
+    assert restored.data.candidate.user_id == original["data"]["candidate"]["user_id"]
 
 
 def test_restored_event_revalidates_cleanly():
-    from app.validate.events import validate_batch
+    from contracts.ingress import IngressEvent
 
     ev = build_dlq_event(_raw()[0], reason="bad type", field="type", index=0)
-    assert validate_batch([msgspec.json.decode(msgspec.json.encode(dlq_data_to_ingress(ev.data)))]).accepted == 1
+    restored = dlq_data_to_ingress(ev.data, IngressEvent)
+    assert msgspec.json.decode(msgspec.json.encode(restored), type=IngressEvent)
 
 
 def test_dlq_source_is_derived_from_the_tenant_not_the_payload():

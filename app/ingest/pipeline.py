@@ -69,6 +69,7 @@ from contracts.attributes import (
     partitionkey_conflicts,
 )
 from contracts.cloudevent import CandidateMetadata, CloudEvent, Data, EventPayload
+from contracts.ingress import IngressCandidate, IngressData, IngressEvent
 
 REASON_RATE_LIMITED = "RATE_LIMITED"
 REASON_SINK_UNAVAILABLE = "SINK_UNAVAILABLE"
@@ -126,64 +127,11 @@ class Sink(Protocol):
 
 
 # --- the request shape -------------------------------------------------------
-
-
-class IngressCandidate(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True):
-    """`data.candidate` as a client sends it: plaintext, before encryption.
-
-    `forbid_unknown_fields` is a security control here, not tidiness: it is what
-    refuses a client-supplied `email_enc`/`email_hmac`, so the gateway can never
-    be talked into publishing ciphertext it did not produce.
-    """
-
-    #: Opaque per-user identifier. It is NOT a pseudonym yet -- the gateway HMACs
-    #: it in the encrypt stage, because the client cannot: the `mac_key` derives
-    #: from a master secret the gateway holds alone.
-    user_id_pseudo: str
-    email: str | None = None
-    phone: str | None = None
-    alternate_phone: str | None = None
-    name: str | None = None
-    gender: str | None = None
-    experience_status: str | None = None
-    years_of_experience: float | None = None
-    education_degree: str | None = None
-    education_branch: str | None = None
-
-
-class IngressData(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True):
-    candidate: IngressCandidate
-    #: The published payload struct verbatim. There is nothing to loosen about
-    #: it, and a second copy would only be a second thing to keep in sync.
-    event_payload: EventPayload
-
-
-class IngressEvent(msgspec.Struct, omit_defaults=True, forbid_unknown_fields=True):
-    """One CloudEvents batch element as it arrives.
-
-    The field set is the published allowlist (`contracts.attributes.
-    SAFE_CONTEXT_ATTRS`) plus `data`, which a test asserts, so the two cannot
-    drift. `forbid_unknown_fields` therefore enforces the allowlist here instead
-    of relying on a separate pass over the raw dict.
-    """
-
-    specversion: str
-    id: str
-    source: str
-    type: str
-    time: str
-    data: IngressData
-    subject: str | None = None
-    dataschema: str | None = None
-    datacontenttype: str | None = None
-    keyversion: int | None = None
-    sequence: str | None = None
-    sourcechannel: str | None = None
-    referrertype: str | None = None
-    completionmethod: str | None = None
-    #: Never used for routing. Read only so a hint disagreeing with the derived
-    #: key can be refused with 403 (C2).
-    partitionkey: str | None = None
+# The ingress schema is published in `contracts/ingress.py`, not defined here, so
+# that the examples, the driver and the schema file all describe the same wire
+# shape. An earlier version kept private copies, which meant the published
+# examples and the driver emitted the POST-encryption shape and were refused by
+# this pipeline with `SCHEMA at $.data.candidate`.
 
 
 # --- the result --------------------------------------------------------------
@@ -256,7 +204,7 @@ def _contract_form(event: IngressEvent) -> IngressEvent:
         event,
         data=IngressData(
             candidate=CandidateMetadata(
-                user_id_pseudo=candidate.user_id_pseudo,
+                user_id_pseudo=candidate.user_id,
                 experience_status=candidate.experience_status,
                 years_of_experience=candidate.years_of_experience,
                 education_degree=candidate.education_degree,
@@ -288,7 +236,7 @@ def _encrypt(event: IngressEvent, *, keys: TenantKeyRegistry, source_channel: st
         source=event.source,
         event_id=event.id,
         event_type=event.type,
-        raw_user_id=candidate.user_id_pseudo,
+        raw_user_id=candidate.user_id,
         email=candidate.email,
         phone=candidate.phone,
         alternate_phone=candidate.alternate_phone,

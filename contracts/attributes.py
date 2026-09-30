@@ -67,12 +67,19 @@ _PROBLEM_FIELD = {
 }
 
 
-def envelope_problem(ev: CloudEvent) -> str | None:
+def envelope_problem(
+    ev: CloudEvent, *, require_pseudonymous_subject: bool = False
+) -> str | None:
     """Return a safe problem CODE for the envelope, or None when it is valid.
 
     Codes rather than messages: a rejection reason is written to the DLQ, and a
     message built from the value (e.g. "time 'x' is not RFC 3339") would put the
     offending value into a second Kafka topic.
+
+    `require_pseudonymous_subject` is an EGRESS-only rule. At ingress a client
+    sends its own raw identifier -- it cannot HMAC anything, the gateway holds
+    the secret. Only what we PUBLISH must carry `user_id_pseudo` (plan H3), so
+    applying this to an ingress event would refuse every well-formed client.
     """
     if not _SOURCE_RE.match(ev.source):
         return "BAD_SOURCE"
@@ -80,22 +87,27 @@ def envelope_problem(ev: CloudEvent) -> str | None:
         return "BAD_TIME"
     if not ev.id:
         return "BAD_ID"
-    if ev.type.endswith(("user-registered", "user-logged-in")):
+    if require_pseudonymous_subject and ev.type.endswith(
+        ("user-registered", "user-logged-in")
+    ):
         if ev.subject and ev.subject.startswith(("usr_", "user_")):
             return "RAW_SUBJECT"
     return None
 
 
-def validate_envelope(ev: CloudEvent) -> None:
+def validate_envelope(ev: CloudEvent, *, published: bool = False) -> None:
     """Raise ValueError if the envelope breaks a prose CloudEvents rule.
 
-    The message names the code and the field, never the value.
+    The message names the code and the field, never the value. Pass
+    `published=True` for an event on its way to Kafka.
     """
     for name in SAFE_CONTEXT_ATTRS:
         if not is_valid_attribute_name(name):  # pragma: no cover - guards our own table
             raise ValueError(f"our attribute name {name!r} is invalid")
 
-    problem = envelope_problem(ev)
+    problem = envelope_problem(
+        ev, require_pseudonymous_subject=published
+    )
     if problem:
         raise ValueError(f"{problem} at {_PROBLEM_FIELD.get(problem, '$')}")
 

@@ -193,7 +193,7 @@ def max_events_per_user(batches: Iterable[list[dict]]) -> int:
     totals: dict[tuple[str, str], int] = {}
     for batch in batches:
         for ev in batch:
-            key = (ev["source"], ev["data"]["candidate"]["user_id_pseudo"])
+            key = (ev["source"], ev["data"]["candidate"]["user_id"])
             totals[key] = totals.get(key, 0) + 1
     return max(totals.values(), default=0)
 

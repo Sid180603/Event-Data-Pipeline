@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import msgspec
+
 from contracts.attributes import distinct_sources
-from contracts.cloudevent import decode_batch
+from contracts.ingress import decode_ingress
 from contracts.ledger import Ledger
 from driver.corpus import CorpusBuilder
 
@@ -16,7 +18,7 @@ def _builder(**kw) -> CorpusBuilder:
 
 def test_every_batch_is_single_tenant():
     for batch in _builder().batches(60):
-        assert distinct_sources(decode_batch(batch)) == 1
+        assert distinct_sources(decode_ingress(msgspec.json.encode(batch))) == 1
 
 
 def test_batches_respect_the_event_cap():
@@ -26,7 +28,7 @@ def test_batches_respect_the_event_cap():
 
 def test_every_event_in_every_batch_decodes():
     for batch in _builder().batches(40):
-        assert len(decode_batch(batch)) == len(batch)
+        assert len(decode_ingress(msgspec.json.encode(batch))) == len(batch)
 
 
 def test_the_corpus_spans_every_tenant():

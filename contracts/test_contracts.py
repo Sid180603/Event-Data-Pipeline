@@ -16,6 +16,7 @@ from contracts.cloudevent import (
     EVENT_TYPES,
     decode_batch,
 )
+from contracts.ingress import IngressEvent, decode_ingress
 from contracts.ledger import LedgerRecord, Ledger, dedup_key
 
 HERE = Path(__file__).parent
@@ -43,6 +44,18 @@ SAFE_CONTEXT_ATTRS = {
 
 def _example(name: str) -> dict:
     return json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
+
+
+def decode_ingress_batch(batch: list[dict]) -> list[IngressEvent]:
+    """Published examples are the INGRESS shape -- what a client sends.
+
+    A client cannot hold a tenant key, so it sends plaintext PII and the gateway
+    encrypts on the way in. The egress shape (`contracts.cloudevent.CloudEvent`)
+    is what lands on the topic and is validated separately, in
+    `app/ingest/test_pipeline.py`, which exercises the real ingress -> egress
+    transform.
+    """
+    return decode_ingress(msgspec.json.encode(batch))
 
 
 # --- Attribute naming rules (E2) --------------------------------------------
@@ -75,7 +88,7 @@ def test_attribute_name_rejects_data_which_is_reserved():
 @pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.json")), ids=lambda p: p.name)
 def test_every_example_decodes(path):
     batch = _example(path.name)
-    events = decode_batch(batch)
+    events = decode_ingress_batch(batch)
     assert len(events) == len(batch)
     for ev in events:
         assert ev.specversion == "1.0"
@@ -85,7 +98,7 @@ def test_every_example_decodes(path):
 def test_examples_cover_all_nine_event_types():
     seen = set()
     for path in EXAMPLES.glob("*.json"):
-        for ev in decode_batch(_example(path.name)):
+        for ev in decode_ingress_batch(_example(path.name)):
             seen.add(ev.type)
     assert seen == set(EVENT_TYPES), f"missing: {set(EVENT_TYPES) - seen}"
 
@@ -106,7 +119,7 @@ def test_bad_source_prefix_is_rejected():
     payload = _example("job-viewed.json")[0]
     payload["source"] = "not-a-career-source"
     with pytest.raises(ValueError, match="source"):
-        ev = decode_batch([payload])[0]
+        ev = decode_ingress_batch([payload])[0]
         A.validate_envelope(ev)
 
 
@@ -114,7 +127,7 @@ def test_non_rfc3339_time_is_rejected():
     payload = _example("job-viewed.json")[0]
     payload["time"] = "30-09-2026 14:43:09"
     with pytest.raises(ValueError, match="time"):
-        A.validate_envelope(decode_batch([payload])[0])
+        A.validate_envelope(decode_ingress_batch([payload])[0])
 
 
 def test_unknown_event_type_is_rejected():
@@ -153,25 +166,53 @@ def test_underscored_attribute_in_envelope_fails_the_allowlist():
 
 
 def test_no_pii_values_appear_in_context_attributes():
-    """Context attributes carry identifiers and routing, never PII values."""
+    """Context attributes carry identifiers and routing, never PII values.
+
+    Egress-shaped event: the sentinel stands in for whatever a caller might try
+    to smuggle into a context attribute. At ingress the PII field is `email` and
+    lives under `data`, which the allowlist already covers.
+    """
     sentinel = "SENTINEL-8f3a@example.invalid"
-    payload = _example("job-viewed.json")[0]
-    payload["data"]["candidate"]["email_enc"] = sentinel
-    ev = decode_batch([payload])[0]
+    from contracts.cloudevent import Data as _Data
+    from contracts.cloudevent import CandidateMetadata
+
+    ev = decode_batch(
+        [
+            {
+                **_example("job-viewed.json")[0],
+                "data": {
+                    "candidate": CandidateMetadata(user_id_pseudo="a1b2c3"),
+                    "event_payload": {"job_id": "job_1", "session_id": "sess_1"},
+                },
+            }
+        ]
+    )[0]
     for attr in SAFE_CONTEXT_ATTRS:
         value = getattr(ev, attr, None)
         if isinstance(value, str):
             assert sentinel not in value, f"PII leaked into context attr {attr}"
 
 
-def test_identity_events_use_pseudonymous_subject():
-    """H3: raw user_id must not be the subject of USER_* events."""
-    for path in EXAMPLES.glob("*.json"):
-        for ev in decode_batch(_example(path.name)):
-            if ev.type.endswith(("user-registered", "user-logged-in")):
-                assert ev.subject and not ev.subject.startswith("usr_"), (
-                    f"raw user id as subject in {path.name}"
-                )
+def test_identity_events_use_pseudonymous_subject_when_published():
+    """H3 applies to what we PUBLISH, not to what a client sends."""
+    from contracts.cloudevent import CandidateMetadata, decode_batch
+
+    raw = decode_batch(
+        [
+            {
+                **_example("user-logged-in.json")[0],
+                "data": {
+                    "candidate": CandidateMetadata(user_id_pseudo="a1b2c3"),
+                    "event_payload": {"job_id": "-", "session_id": "s1"},
+                },
+            }
+        ]
+    )[0]
+    # A published identity event carrying a raw usr_ id is the H3 violation.
+    raw.subject = "usr_992182741"
+    assert A.envelope_problem(raw, require_pseudonymous_subject=True) == "RAW_SUBJECT"
+    # ...and the same value is legitimate on the wire from a client.
+    assert A.envelope_problem(raw) is None
 
 
 # --- Single-tenant batches (D2) ---------------------------------------------
@@ -181,12 +222,12 @@ def test_mixed_tenant_batch_is_detected():
     a = _example("job-viewed.json")[0]
     b = _example("job-viewed.json")[0]
     b["source"] = "/careers/other_tenant_1"
-    evs = decode_batch([a, b])
+    evs = decode_ingress_batch([a, b])
     assert A.distinct_sources(evs) == 2
 
 
 def test_single_tenant_batch_has_one_source():
-    evs = decode_batch(_example("job-viewed.json"))
+    evs = decode_ingress_batch(_example("job-viewed.json"))
     assert A.distinct_sources(evs) == 1
 
 
@@ -203,6 +244,58 @@ def test_generated_schema_is_committed_and_not_stale():
     )
 
 
+def test_the_ingress_schema_is_published_and_not_stale():
+    """Both shapes are contracts. The ingress one is what a client codes against,
+    so it must be as published and as fresh as the egress one."""
+    from contracts.ingress import generate_ingress_schema_json
+
+    path = HERE / "ingress.schema.json"
+    assert path.exists(), "ingress.schema.json missing — regenerate it"
+    assert json.loads(path.read_text(encoding="utf-8")) == json.loads(
+        generate_ingress_schema_json()
+    ), "ingress.schema.json is stale"
+
+
+def test_the_ingress_schema_is_self_contained():
+    """A `$ref` into a `$defs` block that was not published is a 3-line file that
+    validates nothing. The components must travel with the root."""
+    doc = json.loads((HERE / "ingress.schema.json").read_text(encoding="utf-8"))
+    defs = doc.get("$defs", {})
+    assert defs, "ingress.schema.json has no $defs — every $ref would dangle"
+    assert {"IngressEvent", "IngressCandidate", "IngressData"} <= set(defs)
+    assert doc["$defs"]["IngressCandidate"]["required"] == ["user_id"]
+    # And the ingress candidate is plaintext, not ciphertext.
+    props = set(doc["$defs"]["IngressCandidate"]["properties"])
+    assert "email" in props and "user_id" in props
+    assert not any(p.endswith("_enc") or p == "user_id_pseudo" for p in props)
+
+
+def test_ingress_and_egress_candidate_shapes_are_different():
+    """They must not be conflated: one struct for both directions means a client
+    can post nothing at all."""
+    from contracts.cloudevent import CandidateMetadata
+    from contracts.ingress import IngressCandidate
+
+    ingress = set(IngressCandidate.__struct_fields__)
+    egress = set(CandidateMetadata.__struct_fields__)
+    assert "email" in ingress and "email" not in egress
+    assert "user_id" in ingress and "user_id_pseudo" in egress
+    # Neither shape accepts the other's PII fields.
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.json.decode(
+            msgspec.json.encode(
+                {
+                    **_example("job-viewed.json")[0],
+                    "data": {
+                        "candidate": {"user_id": "u1", "email_enc": "x"},
+                        "event_payload": {"job_id": "j", "session_id": "s"},
+                    },
+                }
+            ),
+            type=list[IngressEvent],
+        )
+
+
 # --- Derived Kafka key (C2) --------------------------------------------------
 
 
@@ -210,7 +303,7 @@ def test_kafka_key_is_derived_not_taken_from_the_envelope():
     """C2: the client cannot choose the partition key."""
     payload = _example("job-viewed.json")[0]
     payload["partitionkey"] = "victim_tenant|victim_user"  # attacker-controlled
-    ev = decode_batch([payload])[0]
+    ev = decode_ingress_batch([payload])[0]
     key = A.derive_kafka_key("acme_8921", "a1b2c3d4e5f6")
     assert key == "acme_8921|a1b2c3d4e5f6"
     assert "victim" not in key

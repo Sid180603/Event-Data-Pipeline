@@ -7,7 +7,35 @@ Regenerate with `python -m contracts.gen_schema`; the test suite fails if it dri
 
 ---
 
-## 1. Endpoints
+## 1. Two schemas, and which is which
+
+This is the single most important thing to get right when writing a client, so it comes first.
+
+| | **Ingress** — what you POST | **Egress** — what lands on Kafka |
+|---|---|---|
+| Schema file | `contracts/ingress.schema.json` | `contracts/event.schema.json` |
+| `data.candidate.user_id` | your raw per-user id | — |
+| `data.candidate.user_id_pseudo` | — | `HMAC-SHA256(mac_key, user_id)` |
+| `data.candidate.email` | plaintext | — |
+| `data.candidate.email_hmac` | — | HMAC, for grouping |
+| `data.candidate.email_enc` | — | AES-GCM ciphertext |
+| Who produces it | **you** | the gateway |
+
+**A client cannot hold a tenant key, so it sends plaintext.** The gateway encrypts on the way in.
+The two shapes are deliberately different structs, and both reject the other's PII fields — you
+cannot post a ciphertext you made up, and you cannot receive a plaintext one.
+
+**Do not send `*_enc`, `*_hmac`, or `user_id_pseudo`.** All three are rejected with
+`UNKNOWN_ATTRIBUTE`. The gateway must never publish ciphertext it did not produce, and an
+`email_hmac` from a client would let a caller choose how a candidate is grouped in analytics.
+
+**`user_id` vs `user_id_pseudo` are not interchangeable.** `user_id` is your raw identifier;
+`user_id_pseudo` is an HMAC the gateway computes. They are named differently so the two are never
+confused in a log line or a key.
+
+Examples for both directions are in `contracts/examples/` (ingress) and are validated in CI.
+
+## 2. Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -41,7 +69,7 @@ advertisement.
 `app/config.py` is the single source of truth for both numbers (`MAX_EVENTS_PER_BATCH = 500`,
 `MAX_BATCH_BYTES = 4 MiB`).
 
-## 2. Response semantics — read this before writing a client
+## 3. Response semantics - read this before writing a client
 
 | Status | Meaning |
 |---|---|
@@ -71,7 +99,7 @@ events as sent-but-not-accepted, so reconciliation shows a shortfall rather than
 mid-flight loses the un-acked window. That window is measured and reported in T11 Chaos 1 rather than
 claimed to be zero.
 
-## 3. Pipeline order — load-bearing
+## 4. Pipeline order — load-bearing
 
 ```
 decode → auth → validate → encrypt → produce
@@ -81,7 +109,7 @@ The DLQ therefore carries the **post-encryption** event. `error_context` carries
 `index`, `stage` and the error metadata, and **never the offending value**. A DLQ event can be
 re-injected without double-encryption.
 
-## 4. Idempotency and dedup
+## 5. Idempotency and dedup
 
 - **Dedup key is `(source, id)`** — the CloudEvents rule: *"Consumers MAY assume that Events with
   identical `source` and `id` are duplicates."*
@@ -92,7 +120,7 @@ re-injected without double-encryption.
 - **Duplicate `id` within a single batch is rejected** with a per-event `400`-equivalent entry, because
   silently accepting them would let downstream dedup collapse N real events into one.
 
-## 5. Ordering — what we actually promise
+## 6. Ordering — what we actually promise
 
 > Events for the same `(career_site_id, user_id)` are produced in order **by a single gateway worker**,
 > guaranteed by sticky routing on `hash(career_site_id | user_id_pseudo)`. Ordering is **not** guaranteed
@@ -107,7 +135,7 @@ producer. Kafka orders by partition-append within a producer; across independent
 nondeterministic. Sticky routing is what makes single-producer ordering hold, and `sequence` is what
 survives a worker restart. **The Queue team's Flink sessionization must use `sequence`.**
 
-## 6. Kafka
+## 7. Kafka
 
 - **One topic: `career.events.raw`.** DLQ: `career.events.dlq`.
 - **The key is derived by the gateway** as `<career_site_id>|<user_id_pseudo>`.
@@ -118,7 +146,7 @@ survives a worker restart. **The Queue team's Flink sessionization must use `seq
   **with no error raised by any client**. Our ordering and dedup claims both depend on it.
 - The raw `user_id` **never** appears in a context attribute or in the Kafka key.
 
-## 7. Tenancy and auth
+## 8. Tenancy and auth
 
 - **Asymmetric JWT** — EdDSA preferred, RS256 acceptable, public key from `JWT_PUBLIC_KEY_PEM`.
   The gateway holds **only a public key and cannot mint a token**.
@@ -129,7 +157,7 @@ survives a worker restart. **The Queue team's Flink sessionization must use `seq
   enforceable, and it also means **one JWT verification per batch, not per event**.
 - A `career_site_id` absent from the tenant registry is rejected.
 
-## 8. PII
+## 9. PII
 
 - All PII is inside `data`. **Context attributes carry identifiers and routing, never PII values.**
 - Per tenant, two purpose-separated keys:
@@ -140,7 +168,7 @@ survives a worker restart. **The Queue team's Flink sessionization must use `seq
 - The decrypt endpoint is **operator-only**, gated by a credential separate from tenant auth, and every
   decrypt is audit-logged with *who* and *which `(source, id)`*.
 
-## 9. Client obligations (UI team)
+## 10. Client obligations (UI team)
 
 1. **Batch** — ≤ 200 events / ≤ 2 MiB per request. Batching is mandatory, not an optimisation: at
    50,000 events/sec with one event per request, the required request rate is not reachable in Python.
@@ -149,7 +177,7 @@ survives a worker restart. **The Queue team's Flink sessionization must use `seq
 4. **Reuse `id` on retry.**
 5. **Do not pre-hash the partition key** and do not rely on `partitionkey`.
 
-## 10. Amends `SPEC.txt`
+## 11. Amends `SPEC.txt`
 
 `SPEC.txt:133` proposed a topic per event type. **That is superseded** — see §6. Splitting event types
 across topics would break sessionization, which must order `APPLICATION_STARTED` → `STEP_COMPLETED` →
@@ -159,7 +187,7 @@ across topics would break sessionization, which must order `APPLICATION_STARTED`
 (`SPEC.txt:338-339`), not by the client or the generator. Both teams emitting it would double-count the
 drop-off metric.
 
-## 11. Ledger schema (T11 depends on this)
+## 12. Ledger schema (T11 depends on this)
 
 Ground truth, one schema, defined once:
 

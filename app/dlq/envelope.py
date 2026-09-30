@@ -107,8 +107,13 @@ def build_dlq_event(
     )
 
 
-def dlq_data_to_ingress(data: DlqData) -> CloudEvent:
-    """Recover the original event for replay, without re-encrypting (C3)."""
-    return msgspec.json.decode(
-        msgspec.json.encode(data.original_payload), type=CloudEvent
-    )
+def dlq_data_to_ingress(data: DlqData, target: type = CloudEvent):
+    """Recover the original event for replay, without re-encrypting (C3).
+
+    `target` is the shape the payload was stored in. A validation rejection is
+    recorded before the encrypt stage, so it round-trips to an `IngressEvent`
+    and re-submits to be encrypted exactly once. A post-encryption rejection
+    round-trips to a `CloudEvent` and must NOT be re-encrypted — that would
+    produce undecryptable ciphertext.
+    """
+    return msgspec.json.decode(msgspec.json.encode(data.original_payload), type=target)

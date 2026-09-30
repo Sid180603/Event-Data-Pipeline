@@ -15,7 +15,25 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "contracts" / "examples"
 
 
 def _raw(name: str = "job-viewed.json") -> list[dict]:
-    return json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
+    """EGRESS-shaped events.
+
+    `app/validate` runs on what is PUBLISHED, so it validates
+    `contracts.cloudevent.CloudEvent` -- the post-encryption shape. The published
+    examples are the ingress shape (what a client sends), so this builds its own
+    egress fixture rather than reusing them. The ingress->egress transform is
+    covered by `app/ingest/test_pipeline.py`.
+    """
+    import msgspec
+
+    from contracts.cloudevent import CandidateMetadata
+
+    raw = json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
+    for ev in raw:
+        ev["data"]["candidate"] = msgspec.json.decode(
+            msgspec.json.encode(CandidateMetadata(user_id_pseudo="a1b2c3")),
+            type=dict,
+        )
+    return raw
 
 
 # --- happy path --------------------------------------------------------------

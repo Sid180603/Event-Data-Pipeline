@@ -81,14 +81,18 @@ def _event(
         "sequence": str(seq).zfill(_SEQ_WIDTH),
         "sourcechannel": cfg.source_channel,
         "data": {
+            # INGRESS shape, not the post-encryption shape. A client cannot hold
+            # a tenant key, so it sends plaintext; the gateway encrypts. Emitting
+            # `*_enc` here was refused by the pipeline with
+            # `SCHEMA at $.data.candidate` and meant the driver could not drive
+            # load at all. See contracts/ingress.py.
             "candidate": {
-                "user_id_pseudo": cfg.user_pseudo,
-                "email_hmac": uuid.uuid4().hex[:16],
-                "email_enc": "Y2lwaGVydGV4dA==",
-                "phone_enc": "cGhvbmUtY2lwaGVy",
-                "alternate_phone_enc": "YWx0LWNpcGhlcg==",
-                "name_enc": "bmFtZS1jaXBoZXI=",
-                "gender_enc": "Z2VuZGVyLWNpcGhlcg==",
+                "user_id": f"usr_{cfg.user_pseudo[-8:]}",
+                "email": f"candidate{cfg.user_pseudo[-6:]}@example.invalid",
+                "phone": f"+9198765{cfg.user_pseudo[-6:]}",
+                "alternate_phone": f"+9198766{cfg.user_pseudo[-6:]}",
+                "name": f"Candidate {cfg.user_pseudo[-4:]}",
+                "gender": "PREFER_NOT_TO_SAY",
                 "experience_status": "EXPERIENCED",
                 "years_of_experience": 3.5,
                 "education_degree": "B.Tech",

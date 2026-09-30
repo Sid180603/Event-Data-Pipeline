@@ -1,0 +1,366 @@
+{
+  "$ref": "#/$defs/IngressEvent",
+  "$defs": {
+    "IngressEvent": {
+      "title": "IngressEvent",
+      "description": "One CloudEvents batch element as it arrives on the wire.\n\n    The field set is the published allowlist\n    (`contracts.attributes.SAFE_CONTEXT_ATTRS`) plus `data`, which a test asserts,\n    so the two cannot drift. `forbid_unknown_fields` therefore enforces the\n    allowlist here rather than relying on a separate pass over the raw dict.",
+      "type": "object",
+      "properties": {
+        "specversion": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/IngressData"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dataschema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "datacontenttype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "keyversion": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sourcechannel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "referrertype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "completionmethod": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "partitionkey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "specversion",
+        "id",
+        "source",
+        "type",
+        "time",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "IngressData": {
+      "title": "IngressData",
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/IngressCandidate"
+        },
+        "event_payload": {
+          "$ref": "#/$defs/EventPayload"
+        }
+      },
+      "required": [
+        "candidate",
+        "event_payload"
+      ],
+      "additionalProperties": false
+    },
+    "IngressCandidate": {
+      "title": "IngressCandidate",
+      "description": "`data.candidate` as a client sends it.\n\n    `user_id` is the client's own opaque per-user identifier, NOT a pseudonym.\n    The gateway HMACs it into `user_id_pseudo` during the encrypt stage, because\n    the `mac_key` derives from a master secret the gateway alone holds. The two\n    fields are deliberately named differently so nobody mistakes the raw value\n    for the hashed one.",
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "phone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alternate_phone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gender": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "experience_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "years_of_experience": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "education_degree": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "education_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    },
+    "EventPayload": {
+      "title": "EventPayload",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "step_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "step_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "completion_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "HYBRID",
+                "MANUAL",
+                "RESUME_AUTOFILL"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "time_spent_on_step_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "total_application_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommended_job_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "client_metadata": {
+          "type": "object",
+          "default": {}
+        }
+      },
+      "required": [
+        "job_id",
+        "session_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

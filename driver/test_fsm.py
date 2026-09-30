@@ -7,6 +7,7 @@ work.
 
 from __future__ import annotations
 
+import msgspec
 import pytest
 
 from driver.fsm import (
@@ -88,14 +89,40 @@ def test_a_step_completed_is_never_emitted_without_an_application_started():
 # --- envelope validity -------------------------------------------------------
 
 
-def test_every_generated_event_is_a_valid_envelope():
+def test_every_generated_event_is_a_valid_ingress_envelope():
+    """The driver emits the INGRESS shape, because that is what a client sends.
+    A client cannot hold a tenant key, so it cannot produce `*_enc` fields."""
+    from contracts.ingress import decode_ingress
+
+    events = generate_session(_cfg())
+    decoded = decode_ingress(msgspec.json.encode(events))
+    assert len(decoded) == len(events)
+    for ev in decoded:
+        assert ev.specversion == "1.0"
+        assert envelope_problem(ev) is None
+
+
+def test_ingress_shaped_events_are_REJECTED_by_the_egress_schema():
+    """Regression guard: the two shapes must be genuinely distinct.
+
+    Emitting the egress shape was refused by the pipeline with
+    `SCHEMA at $.data.candidate`, which meant the driver could not drive load at
+    all. This asserts the shapes are not interchangeable in either direction.
+    """
     from contracts.cloudevent import decode_batch
 
     events = generate_session(_cfg())
-    decoded = decode_batch(events)
-    assert len(decoded) == len(events)
-    for ev in decoded:
-        assert envelope_problem(ev) is None
+    with pytest.raises(msgspec.ValidationError):
+        decode_batch(events)
+
+
+def test_every_generated_event_carries_plaintext_pii_to_be_encrypted():
+    ev = generate_session(_cfg())[0]
+    candidate = ev["data"]["candidate"]
+    for field in ("email", "phone", "alternate_phone", "name", "gender", "user_id"):
+        assert candidate.get(field), f"ingress candidate missing {field}"
+    assert not any(k.endswith("_enc") for k in candidate)
+    assert "user_id_pseudo" not in candidate
 
 
 def test_every_generated_event_belongs_to_the_session_tenant():

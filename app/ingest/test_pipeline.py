@@ -189,7 +189,10 @@ class RecordingSink:
 
 def candidate(**overrides: Any) -> dict:
     base = {
-        "user_id_pseudo": CANARY_USER,
+        # Ingress field name. A client sends its own raw id; the gateway HMACs it
+        # into `user_id_pseudo` during the encrypt stage. The two are deliberately
+        # named differently -- see contracts/ingress.py.
+        "user_id": CANARY_USER,
         "email": CANARY_EMAIL,
         "name": CANARY_NAME,
         "phone": CANARY_PHONE,
@@ -457,7 +460,7 @@ def test_a_validation_rejection_dlq_carries_the_unencrypted_ingress_payload(issu
     assert len(sink.dlq) == 1
     payload = sink.dlq_events()[0].data.original_payload
     assert payload["data"]["candidate"]["email"] == CANARY_EMAIL
-    assert payload["data"]["candidate"]["user_id_pseudo"] == CANARY_USER
+    assert payload["data"]["candidate"]["user_id"] == CANARY_USER
     assert sink.sent == []
 
 
@@ -853,29 +856,44 @@ def test_the_ingress_allowlist_matches_the_published_one():
     assert set(IngressEvent.__struct_fields__) == set(SAFE_CONTEXT_ATTRS) | {"data"}
 
 
-def test_the_published_examples_are_the_POST_encryption_shape(issuer, verifier, tenants, keys, buckets, sink):
-    """A cross-task conflict, pinned so it cannot be discovered at the demo.
+def test_the_published_examples_are_the_INGRESS_shape(issuer, verifier, tenants, keys, buckets, sink):
+    """The cross-task conflict that blocked the driver, now fixed and pinned.
 
-    `contracts/examples/*.json` and `driver/fsm.py` both emit `data.candidate`
-    ALREADY holding `*_enc` -- they are the *Kafka* shape, not the *request*
-    shape. The gateway encrypts, so its request shape is the plaintext one, and
-    these are refused. The fix belongs upstream: the ingress schema needs
-    publishing in `CONTRACT.md` alongside `event.schema.json`, and the examples
-    and the driver corpus need regenerating in it. Until then the driver cannot
-    drive load through `/v1/ingest`.
+    `contracts/examples/*.json` and `driver/fsm.py` used to emit `data.candidate`
+    ALREADY holding `*_enc` -- the *Kafka* shape. A client cannot hold a tenant
+    key, so its request shape is the plaintext one, and those events were refused
+    with `SCHEMA at $.data.candidate`. That meant the driver could not drive load
+    at all, and T11's `sent == accepted == stored` could never reconcile.
+
+    Fixed by publishing `contracts/ingress.py` and regenerating both. This test
+    is the guard: the published examples must ACCEPT, and the produced event must
+    come out encrypted.
     """
     import json
 
     from pathlib import Path
 
     examples = Path(__file__).resolve().parents[2] / "contracts" / "examples"
-    raw = (examples / "job-viewed.json").read_bytes()
-    result = run(raw, issuer=issuer, verifier=verifier, tenants=tenants, keys=keys, buckets=buckets, sink=sink)
+    for name in ("job-viewed.json", "application-step-completed.json", "user-logged-in.json"):
+        raw = (examples / name).read_bytes()
+        result = run(
+            raw, issuer=issuer, verifier=verifier, tenants=tenants, keys=keys, buckets=buckets, sink=sink
+        )
+        assert result.accepted == len(json.loads(raw)), f"{name} was refused: {result.rejected}"
+        # The example is unambiguously ingress: plaintext, no ciphertext fields.
+        candidate_block = json.loads(raw)[0]["data"]["candidate"]
+        assert not any(k.endswith("_enc") for k in candidate_block)
+        assert "user_id" in candidate_block
 
-    assert result.accepted == 0
-    assert "SCHEMA" in result.rejected[0].reason
-    # The example is unambiguously post-encryption: it carries a `*_enc` field.
-    assert "email_enc" in json.loads(raw)[0]["data"]["candidate"]
+    # ...and what came out the other side is encrypted.
+    raw_user_id = json.loads((examples / "job-viewed.json").read_text(encoding="utf-8"))[0]["data"][
+        "candidate"
+    ]["user_id"]
+    produced = sink.produced()[0]["data"]["candidate"]
+    assert produced["email_enc"] and produced["user_id_pseudo"]
+    # The raw client id must NOT have been published verbatim.
+    assert produced["user_id_pseudo"] != raw_user_id
+    assert raw_user_id not in str(sink.produced()[0])
 
 
 def test_the_pipeline_body_never_names_a_pii_value(issuer, verifier, tenants, keys, buckets, sink):

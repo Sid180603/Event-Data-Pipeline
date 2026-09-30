@@ -19,7 +19,7 @@ import msgspec
 import pytest
 
 from contracts.attributes import envelope_problem
-from contracts.cloudevent import decode_batch
+from contracts.ingress import decode_ingress
 from contracts.ledger import Ledger
 from driver.corpus import SOURCE_CHANNELS
 from driver.skew import (
@@ -341,7 +341,7 @@ def test_the_corpus_never_generates_application_abandoned():
 
 def test_every_corpus_event_is_a_valid_envelope():
     for batch in _corpus().batches(1_000):
-        assert all(envelope_problem(ev) is None for ev in decode_batch(batch))
+        assert all(envelope_problem(ev) is None for ev in decode_ingress(msgspec.json.encode(batch)))
 
 
 def test_the_corpus_spans_all_three_source_channels():
@@ -370,7 +370,7 @@ def test_every_batch_is_single_tenant():
     from contracts.attributes import distinct_sources
 
     for batch in _corpus().batches(2_000):
-        assert distinct_sources(decode_batch(batch)) == 1
+        assert distinct_sources(decode_ingress(msgspec.json.encode(batch))) == 1
 
 
 def test_sequence_numbers_stay_unique_per_tenant_and_user():
@@ -380,7 +380,7 @@ def test_sequence_numbers_stay_unique_per_tenant_and_user():
     seen: dict[tuple[str, str], set[str]] = {}
     for batch in _corpus(exponent=1.2).batches(8_000):
         for ev in batch:
-            key = (ev["source"], ev["data"]["candidate"]["user_id_pseudo"])
+            key = (ev["source"], ev["data"]["candidate"]["user_id"])
             assert ev["sequence"] not in seen.setdefault(key, set())
             seen[key].add(ev["sequence"])
     assert any(len(v) > 1 for v in seen.values()), "expected repeat users on the whale"
