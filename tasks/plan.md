@@ -49,36 +49,43 @@ The demo is a **3-minute narrative**, not a benchmark.
 | 1 | Contract slide — CloudEvents, single topic, derived key, `(source,id)` dedup | we designed a contract, not a firehose | `CONTRACT.md` done |
 | 2 | A live candidate session flows through | it works end to end | FSM + pipeline |
 | 3 | Raw vs encrypted side by side | PII never leaves in the clear | crypto done, inspector pending |
-| 4 | **Kill the gateway → zero loss, here's the receipt** | ground truth, not vibes | ledger done, chaos pending |
+| 4 | **Kill the gateway → nothing lost, here's the receipt** | ground truth, not vibes | ledger done, chaos pending |
 | 5 | **Inject 5% garbage → DLQ catches exactly 5%** | failures are contained and counted | DLQ done, knob pending |
 | 6 | **One tenant floods → shed that one, 499 unaffected** | multi-tenant isolation | token bucket done |
-| 7 | **Explain the 50k decisions** | the architecture argument | this doc |
 
-**Every beat is falsifiable and none needs 50k/sec.** That is a stronger demo than a number on a
-screen, because a judge can interrupt any of it.
+**Every beat is falsifiable and none needs a throughput claim.** The demo is six beats long and its
+job is to work. A scale question, if a judge asks it, gets a short honest answer from §1.2 — it is not
+a beat and we do not prepare it.
 
-### 1.1 How we talk about 50k — and the honesty rule
+### 1.1 How we talk about scale — one paragraph, not an argument
 
-We claim 50k is **achievable by design**, and we back it with arithmetic. Two rules:
+**The 50k figure is not a claim we make.** The demo does not demonstrate it and does not assert it. If
+a judge asks "how would this scale?", the answer is the paragraph below and nothing more. We spend no
+further time on it.
 
-1. **Show the measured per-event cost, not just the conclusion.** ~55 µs/event measured (T6) → 50k
-   needs ~2.75 core-seconds/sec of logic, so ~4-6 cores. Stating the cost builds credibility;
-   hiding it invites a judge to find it.
-2. **Do not claim it is demonstrated.** It is not, on this hardware, with the full stack. Say so
-   plainly if asked. "Designed for 50k, here are the seven decisions that get us there, and here is
-   the measured cost per event" is defensible. "We do 50k" would not be.
+> The gateway is a synchronous ingest path whose cost is linear in events, not in tenants: batching
+> (1..500 events per request), `msgspec` for parse-and-validate in one native pass, a single Kafka
+> topic with no re-serialisation hop, and sticky routing so one user's events go through one producer.
+> Measured per-event cost is ~55 µs, of which ~42 µs is the crypto facade (five AES-GCM fields plus
+> two HMACs). Tenant count does not multiply cost — buckets and keys are per-tenant maps.
 
-### 1.2 The seven decisions that constitute the 50k argument
+**What this changes in our work:**
 
-| Decision | Effect |
-|---|---|
-| **Batching** (1..500 events/request) | the load-bearing one. 50k events = ~1k req/s at batch 50. At batch 1 the required request rate is unreachable in Python. |
-| **msgspec** for parse+validate in one native pass | `jsonschema` alone would be 5-10x over budget |
-| **Purpose-separated keys + cached AESGCM handles** | 3x faster than building a handle per field (measured) |
-| **Sticky routing** | one producer per user ⇒ Kafka ordering actually holds |
-| **Single topic, no re-serialisation hop** | one encode, not two |
-| **zstd + large batches on the producer** | biggest single wire-side win on JSON |
-| **Replay-mode driver** | generation cost removed from the load path |
+- **No further optimisation toward a throughput target.** The code is correct and tested; that is
+  the bar now. Latency micro-optimisation and hot-path work are explicitly out of scope.
+- **Batching is no longer justified by 50k.** It stands on its own as ordinary good API design —
+  it is what every analytics ingest API does. We describe it that way rather than as a requirement.
+- **The architecture does not depend on the 50k claim.** CloudEvents, tenant isolation, per-tenant
+  keys, AAD-bound ciphertext, the DLQ, sticky routing — all of these are *correctness and security*
+  decisions that stand whether or not the throughput number exists.
+
+### 1.2 What the design still rests on
+
+Worth being precise about, because it is the part that does not move: the load-bearing decisions are
+**correctness and security**, not speed. Tenant isolation, no-PII-in-transit, deterministic dedup,
+bounded loss on failure, per-tenant fairness. Those are what a reviewer — or a judge — will actually
+probe, and all of them are built and tested.
+
 
 ---
 
@@ -176,18 +183,23 @@ Detail and acceptance criteria in `tasks/todo.md`.
 | T8b | 500-tenant Zipfian skew, sharding, webhook source | `driver/{tenants,skew,webhook_source}.py` |
 | T10a | metrics registry | `app/metrics.py` |
 
-### Remaining
+### Remaining — ordered by "does the demo run"
 
 | # | Task | Files | Priority |
 |---|---|---|---|
-| T3 | FastAPI app, Kafka producer sink, compose | `app/main.py`, `app/kafka/**`, `docker-compose.yml`, `driver/replay.py` | **P0** |
-| T11 | verification oracle + chaos scripts | `tools/verify.py`, `scripts/chaos/**` | **P0 — the demo** |
-| T10b | live CLI view, inspector, `Makefile` | `tools/observe.py`, `app/inspect.py`, `Makefile` | **P0 — the demo** |
-| T1r | load client (not a benchmark) | `bench/load.py` | P1 |
-| T9r | producer-config doc + measured A/B numbers | `docs/kafka-producer-tuning.md` | P1 |
-| T8c | injection knobs: `--inject-invalid-rate`, tenant flood | `driver/inject.py` | P1 |
+| **T3** | FastAPI app, Kafka producer sink, compose — **the whole demo depends on this** | `app/main.py`, `app/kafka/**`, `docker-compose.yml`, `driver/replay.py` | **P0 — top** |
+| **T11** | verification oracle + chaos scripts (demo beats 4, 5) | `tools/verify.py`, `scripts/chaos/**` | **P0** |
+| **T10b** | live CLI view, inspector, `Makefile` (demo beats 2, 3) | `tools/observe.py`, `app/inspect.py`, `Makefile` | **P0** |
+| **T8c** | injection knobs: `--inject-invalid-rate`, tenant flood (beats 5, 6) | `driver/inject.py` | **P0 — promoted** |
+| T1r | load client — small, just to show it holds under load | `bench/load.py` | P1 |
+| T9r | producer-config doc + ordering proof | `docs/kafka-producer-tuning.md` | P1 |
 
-**Revised estimate: ~18-24h** (was 55-69h). The reframe is most of the saving.
+**Revised estimate: ~14-18h.** T8c is promoted because demo beats 5 and 6 cannot be performed without
+the injection knobs — it was previously filed as polish.
+
+**Explicitly dropped at r4:** all further throughput optimisation, the T1 benchmark, the 10-minute
+soak, and the seven-decision scale argument. The code is correct and tested; that is the bar.
+
 
 ---
 
@@ -223,10 +235,10 @@ Detail and acceptance criteria in `tasks/todo.md`.
 
 ## 7. Open questions
 
-1. **Is 50k still the number we claim in the design, or has that softened?** Under the r4 posture we
-   explain 50k as a target. If it is now aspirational, we could trim the crypto hot path and spend
-   the time on the chaos demos. *Affects whether T9r is a doc or a project.*
-2. **Who owns the `.wslconfig` change and the WSL2/Docker smoke test?** It gates three teams.
+1. ~~Is 50k still the number we claim?~~ **CLOSED at r4: no.** The demo does not demonstrate or
+   assert 50k. See §1.1 — it is a one-paragraph answer if asked, and no further work is spent on it.
+2. **Who owns the `.wslconfig` change and the WSL2/Docker smoke test?** It gates three teams and is
+   now the single point of failure for "the demo works."
 3. **Kafka version (3.x or 4.x)?** §D11 sets every value explicitly regardless, but the durability
    story differs: on a single broker, ISR is 1, so `acks=all` is cheap but weaker.
 

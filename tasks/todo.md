@@ -3,11 +3,17 @@
 Plan: `tasks/plan.md` · Spec: `SPEC.txt` · **Revision r4** (demo posture settled)
 **P0** = required for the demo · **P1** = high value · **P2** = cut if time-boxed
 
-**Demo posture (r4):** the demo does **not** demonstrate 50k/sec. It demonstrates a working system
-and explains the architecture that would reach 50k. This task list is ordered around that.
+**Demo posture (r4):** the demo does **not** demonstrate or assert 50k/sec. It is six falsifiable
+beats and its job is to work. The demo beats are: contract slide · live session · raw-vs-encrypted ·
+kill the gateway (receipt balances) · inject 5% garbage (DLQ catches exactly 5%) · one tenant floods
+(499 unaffected). No beat needs a throughput claim.
 
-**Cut order:** T1r load client → T8c third injection knob → T9r A/B benchmark (keep the doc) →
-T10b polish on the live view. **Never cut: T3, T5b, T11, T10a.**
+**Q1 is CLOSED: no 50k claim.** Consequences: no further throughput optimisation, T1 benchmark
+cancelled, 10-min soak dropped, the seven-decision scale argument removed. The code is correct and
+tested; that is the bar. Batching now stands as ordinary good API design rather than as a requirement.
+
+**Cut order:** T1r load client → T9r A/B benchmark (keep the doc). **Never cut: T3, T5b, T11, T10a,
+T10b, T8c.**
 
 **Environment:** the running system lives in **WSL2/Ubuntu** (Cassandra and Flink have no native
 Windows support, so the whole stack shares the laptop's 6 cores with Windows). Dev on Windows is fine.
@@ -38,11 +44,12 @@ Gateway and driver in **separate containers with CPU limits**.
 | T3 | FastAPI app, Kafka sink, compose | ⬜ | — | — |
 | T11 | verification oracle + chaos scripts | ⬜ | — | — |
 | T10b | live CLI view, inspector, Makefile | ⬜ | — | — |
+| T8c | injection knobs (`--inject-invalid-rate`, tenant flood) | ⬜ | — | — |
 | T1r | load client | ⬜ | — | — |
 | T9r | producer-config doc | ⬜ | — | — |
-| T8c | injection knobs | ⬜ | — | — |
 
-**219 tests green at r4.**
+**219 tests green at r4.** T8c is P0: demo beats 5 and 6 cannot be performed without the injection
+knobs.
 
 
 ---
