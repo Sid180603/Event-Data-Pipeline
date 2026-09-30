@@ -1,0 +1,1 @@
+"""Ingestion gateway + synthetic driver."""

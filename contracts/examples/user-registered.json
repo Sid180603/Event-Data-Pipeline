@@ -1,0 +1,34 @@
+[
+  {
+    "specversion": "1.0",
+    "id": "01J8XQ4M7K2P9R3S09",
+    "source": "/careers/acme_8921",
+    "type": "com.careerpage.career.user-registered",
+    "time": "2026-09-30T14:43:09.123Z",
+    "subject": "a1b2c3d4e5f6",
+    "dataschema": "https://schema.careerpage.example/event/1.0",
+    "datacontenttype": "application/json",
+    "keyversion": 1,
+    "sequence": "0000000009",
+    "sourcechannel": "WEB_APP",
+    "data": {
+      "candidate": {
+        "user_id_pseudo": "a1b2c3d4e5096f7a8b9c0d1e2f3a4",
+        "email_hmac": "hm09",
+        "email_enc": "enc09",
+        "phone_enc": "penc09",
+        "alternate_phone_enc": "aenc09",
+        "name_enc": "nenc09",
+        "gender_enc": "genc09",
+        "experience_status": "EXPERIENCED",
+        "years_of_experience": 3.5,
+        "education_degree": "B.Tech",
+        "education_branch": "E&E"
+      },
+      "event_payload": {
+        "job_id": "-",
+        "session_id": "sess_8839201923"
+      }
+    }
+  }
+]

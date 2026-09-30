@@ -130,9 +130,20 @@ CREATE TABLE career_page.application_events (
 * API Gateway: Validates tenant JWT tokens, extracts tenant_id, and enforces rate limits using a Token Bucket algorithm per tenant.
 * Schema Validation: Ensures incoming JSON conforms to CloudEvents standards (specifying tenant_id, event_type, and timestamp).
 2. Event Bus Design (Apache Kafka)
-* Topic Naming Convention: career.events.<environment>.<event_type> (e.g., career.events.prod.application-submitted).
-* Partition Strategy: Message Key set to tenant_id.
-   * Why: Guarantees strict order of operations for a specific tenant while parallelizing processing across Kafka brokers.
+* Topic Naming Convention: career.events.raw (single topic, all event types). NOTE: an earlier draft of this
+   spec proposed career.events.<environment>.<event_type> (a topic per event type). That is SUPERSEDED:
+   splitting event types across topics breaks sessionization, which must order APPLICATION_STARTED ->
+   STEP_COMPLETED -> SUBMITTED per (career_site_id, user_id, session_id). See contracts/CONTRACT.md section 6.
+* Wire Format: CloudEvents 1.0 (CNCF Graduated), per SPEC.txt line 131 and contracts/CONTRACT.md.
+* Partition Strategy: Message Key derived by the gateway as <career_site_id>|<user_id_pseudo>; the raw key
+   string is set and Kafka's partitioner hashes it (do NOT pre-hash). A client-supplied partitionkey hint is
+   ignored, and a disagreeing one is rejected.
+   * Why: Guarantees strict order of operations for a specific user within a tenant while parallelizing
+     processing across Kafka brokers. Requires sticky routing on (career_site_id, user_id) so one user maps
+     to one producer; see contracts/CONTRACT.md section 5.
+* Event type is the CloudEvents `type` attribute (reverse-DNS), not a topic.
+* APPLICATION_ABANDONED is synthesised by the Flink sessionization job on the watermark timeout, NOT by the
+   client or the event generator.
 3. Stream Processing Layer (Apache Flink / Spark Streaming)
 The stream processor handles distinct pipelines:
 1. Short-path Pipeline (Cassandra Sink): Writes raw application records and job state changes directly to Cassandra.

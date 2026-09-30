@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "event-generator"
+version = "0.1.0"
+description = "Multi-tenant career-page event ingestion gateway + synthetic driver"
+requires-python = ">=3.11"
+dependencies = [
+    "msgspec>=0.18",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "cryptography>=42",
+    "pyjwt>=2.8",
+    "confluent-kafka>=2.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[tool.setuptools]
+packages = ["app", "contracts", "driver"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "contracts", "app", "driver"]
+python_files = ["test_*.py"]
+addopts = "-q"
+markers = [
+    "integration: requires a live Kafka broker (deselect with '-m \"not integration\"')",
+    "load: throughput measurement, slow",
+]
