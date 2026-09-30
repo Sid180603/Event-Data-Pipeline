@@ -1,0 +1,196 @@
+# Demo stack: Kafka (KRaft), the gateway, and the driver -- as SEPARATE services.
+#
+# --------------------------------------------------------------------------------------
+# WSL2 (the Windows host runs this stack inside WSL2 + Docker Desktop, never natively):
+#
+#   %USERPROFILE%\.wslconfig
+#   [wsl2]
+#   memory=11GB        # the default 50% cap of a 16 GB box is ~8 GB, which does not
+#                      # fit Kafka + gateway + driver. See tasks/plan.md section 3.2.
+#   processors=6
+#   swap=4GB
+#
+# The cpus: limits below sum to ~6, matching `processors=6` on purpose. They are not
+# there to be polite: the driver measures the gateway, and a driver that shares a core
+# with the gateway spends that core being scheduled out. A measurement taken that way
+# is a measurement of the scheduler. Re-derive them together, never one without the other.
+#
+# --------------------------------------------------------------------------------------
+# Before the first `up`, create `.env` -- compose will not invent secrets, and the
+# gateway refuses to start without a master secret and a public key. Run this in WSL2,
+# where the stack actually runs:
+#
+#   python - <<'PY'
+#   import base64, secrets
+#   from cryptography.hazmat.primitives import serialization as s
+#   from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+#   key = Ed25519PrivateKey.generate()
+#   pub = key.public_key().public_bytes(s.Encoding.PEM, s.PublicFormat.SubjectPublicKeyInfo)
+#   with open(".env", "w", encoding="utf-8") as fh:
+#       fh.write("MASTER_SECRET=" + base64.b64encode(secrets.token_bytes(48)).decode() + "\n")
+#       fh.write('JWT_PUBLIC_KEY_PEM="' + pub.decode().strip() + '"\n')
+#       fh.write("OPERATOR_KEY=" + secrets.token_urlsafe(32) + "\n")
+#       fh.write("GATEWAY_TENANTS=" + ",".join(f"tenant_{i:04d}" for i in range(1, 501)) + "\n")
+#   with open("driver-signing-key.pem", "wb") as fh:   # the gateway must NEVER see this
+#       fh.write(key.private_bytes(s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption()))
+#   PY
+#
+# The gateway holds only the public half (app/auth/jwt.py): it must be able to verify a
+# token and must not be able to mint one for any tenant (SPEC D4 / H2). The private half
+# belongs to whoever issues tokens -- in the demo, the driver.
+#
+# `GATEWAY_TENANTS` is the single tenant source: `app/main.py` expands it into one
+# credential per source channel (`cred_<tenant>_web_app` etc., see `credential_id_for`)
+# and builds TenantRegistry, TenantKeyRegistry and BucketRegistry from that same set.
+# Point the driver at the same list.
+#
+# Usage:
+#   docker compose up -d kafka kafka-init        # broker + topics first
+#   docker compose up -d gateway driver
+#   docker compose exec gateway python -c "import urllib.request as u; \
+#       print(u.urlopen('http://localhost:8000/metrics').read().decode()[:800])"
+#   docker compose logs -f driver
+#   docker compose down -v
+
+services:
+  # --- broker: single node, KRaft, no ZooKeeper -------------------------------------
+  # Replication factor 1 everywhere below is a consequence of the single-broker demo,
+  # not a production recommendation: a real deployment is 3+ brokers with RF 3 and
+  # `min.insync.replicas=2`. Idempotence (see app/config.kafka_producer_config) protects
+  # against *client* retries; it cannot protect against losing the only replica.
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: career-kafka
+    hostname: kafka
+    ports:
+      - "127.0.0.1:9092:9092"   # host-local only: a plaintext listener must not be reachable from the LAN
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms1G -Xmx1G"
+      KAFKA_LOG_RETENTION_HOURS: 6
+    cpus: "2.0"
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # --- topics ------------------------------------------------------------------------
+  # A one-shot init container rather than `auto.create.topics.enable`: a topic created
+  # implicitly gets the broker's default partition count, and partition count is a
+  # routing decision here (one partition per concurrent consumer), not a default.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: career-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic career.events.raw --partitions 12 --replication-factor 1 \
+          --config compression.type=zstd --config retention.ms=21600000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic career.events.dlq --partitions 3 --replication-factor 1 \
+          --config compression.type=zstd --config retention.ms=86400000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    cpus: "0.5"
+    mem_limit: 256m
+    restart: "no"
+
+  # --- the gateway --------------------------------------------------------------------
+  # No `build:` because there is no Dockerfile in the repo yet: the image is the
+  # interpreter plus `pip install -e .`, which is slower to start but needs nothing
+  # that is not already here. Add a Dockerfile and swap in `build: .` for anything
+  # beyond a demo.
+  gateway:
+    image: python:3.11-slim
+    container_name: career-gateway
+    working_dir: /app
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      STICKY_ROUTING: "1"
+      # Deliberately NOT set: WORKER_ID. uvicorn cannot give each `--workers` child a
+      # different value, and app.metrics falls back to host:pid, which distinguishes
+      # the workers just as well. Set it explicitly when an orchestrator does spawn
+      # one process per host.
+    volumes:
+      - .:/app
+      - pip-cache:/root/.cache/pip
+    command: >
+      bash -c "pip install --quiet --no-input -e . &&
+      exec uvicorn app.main:build_app_from_env --factory
+      --host 0.0.0.0 --port 8000
+      --loop uvloop --http httptools
+      --workers ${GATEWAY_WORKERS:-4} --log-level info"
+    # 150-250 MB per worker: 4 workers is ~1 GB, hence the 2 GB ceiling. If WSL2 is
+    # memory-bound, trade worker count for batch size (tasks/plan.md 3.2) -- the reverse
+    # does not work.
+    mem_limit: 2g
+    cpus: "3.0"
+    # No healthcheck on a public port: the gateway is internal-only (TLS terminates at
+    # the LB, M11) and nothing outside this network should reach it, least of all a
+    # published port. For a demo on the Windows host, uncomment the mapping below --
+    # 127.0.0.1 only, never 0.0.0.0, because this listener speaks plaintext and carries
+    # bearer tokens and plaintext PII.
+    # ports:
+    #   - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    restart: unless-stopped
+    stop_grace_period: 30s   # SIGTERM -> lifespan shutdown -> the producer drains. Shorter
+                             # than this and `docker compose stop` kills the drain, which
+                             # is exactly the silent loss the bounded buffer exists to bound.
+
+  # --- the driver ---------------------------------------------------------------------
+  # Separate service, separate core: it is the measuring instrument, and an instrument
+  # competing with what it measures reports the scheduler's latency, not the gateway's.
+  driver:
+    image: python:3.11-slim
+    container_name: career-driver
+    working_dir: /app
+    depends_on:
+      gateway:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - .:/app
+      - pip-cache:/root/.cache/pip
+    command: >
+      bash -c "pip install --quiet --no-input -e . &&
+      exec python -m driver.main"
+    mem_limit: 1g
+    cpus: "2.0"
+    restart: "no"
+
+volumes:
+  pip-cache:
