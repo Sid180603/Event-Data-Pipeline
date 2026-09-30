@@ -13,11 +13,11 @@ same catalog would claim the same tenants twice and no tenant at all.
 from __future__ import annotations
 
 import hashlib
-import random
 from collections.abc import Iterable
 from pathlib import Path
 
 from contracts.ledger import Ledger
+from driver.corpus import derive_users
 
 #: 500 tenants, per SPEC.txt:148 ("large enterprise tenants generate
 #: exponentially higher traffic during hiring drives than SMBs" -- which only
@@ -57,8 +57,7 @@ class TenantCatalog:
         and move its sticky route.
         """
         n = self.users_per_tenant if count is None else count
-        rng = random.Random(f"{career_site_id}:users")
-        return [f"{career_site_id}u{rng.randrange(1 << 30):08x}" for _ in range(n)]
+        return derive_users(career_site_id, n)
 
     def shard_of(self, career_site_id: str, shards: int) -> int:
         if shards < 1:

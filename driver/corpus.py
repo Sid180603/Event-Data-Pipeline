@@ -22,6 +22,22 @@ from driver.fsm import ABANDONED, DRAFT_SAVED, SUBMITTED, SessionConfig, generat
 SOURCE_CHANNELS = ["WEB_APP", "MOBILE_APP", "THIRD_PARTY_SERVICE"]
 
 
+def derive_users(career_site_id: str, n: int) -> list[str]:
+    """The canonical user-id derivation for a tenant.
+
+    Lives here, not in `tenants.py`, because both the corpus and the tenant
+    catalog need it and a second copy of an id format is a silent-drift hazard:
+    if one were edited, user ids would change and so would every sticky route
+    derived from them, with nothing failing.
+
+    Prefix-stable: asking for 3 then for 40 yields the same first three, so
+    growing a tenant's user count cannot renumber an existing user and move its
+    sticky route.
+    """
+    rng = random.Random(f"{career_site_id}:users")
+    return [f"{career_site_id}u{rng.randrange(1 << 30):08x}" for _ in range(n)]
+
+
 class CorpusBuilder:
     def __init__(
         self,
@@ -48,10 +64,9 @@ class CorpusBuilder:
         # Deterministic per tenant, so a regenerated corpus is comparable, and
         # cached because it is consulted once per session.
         if career_site_id not in self._user_cache:
-            rng = random.Random(f"{career_site_id}:users")
-            self._user_cache[career_site_id] = [
-                f"{career_site_id}u{rng.randrange(1 << 30):08x}" for _ in range(self.users_per_tenant)
-            ]
+            self._user_cache[career_site_id] = derive_users(
+                career_site_id, self.users_per_tenant
+            )
         return self._user_cache[career_site_id]
 
     def _outcome(self) -> str:
