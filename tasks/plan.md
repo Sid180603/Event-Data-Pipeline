@@ -16,11 +16,13 @@
 | r3 | Research validation. Missed CloudEvents (E1); errors corrected (E2-E4); improvements adopted (I1-I7) |
 | r3.1 | Self-consistency pass. Gaps closed: event types (G1), 64 KiB vs base64 (G2), Java-client-vs-librdkafka (G3) |
 | r3.2 | Independent review. 4 Critical + 9 High + 13 Medium. Root cause of the Criticals: per-process mechanisms claimed as system-wide properties. Fixed via sticky routing, honest contracts, pipeline ordering |
-| **r4** | **Demo posture settled (design-justified 50k, not demonstrated). Hardware answered. Measured per-event cost and JWT throughput folded in — both invalidate earlier estimates.** |
+| **r4** | **Demo posture settled. Hardware answered. Measured per-event cost and JWT throughput folded in — both invalidate earlier estimates.** |
+| **r4.1** | **Q1 closed: no 50k claim.** Demo reduced to six falsifiable beats. All throughput optimisation, the T1 benchmark, the 10-min soak and the seven-decision scale argument dropped. T8c promoted to P0. Document consistency pass. |
 
 ### 0.1 What changed in r4
 
-**The demo does not demonstrate 50k/sec. It demonstrates a working system and explains the architecture that would reach 50k.** This is the organising principle from here on.
+**The demo does not demonstrate 50k/sec, and it does not explain how to reach 50k/sec.** It
+demonstrates a working system, in six falsifiable beats, and that is the whole job.
 
 Consequences:
 
@@ -116,19 +118,19 @@ Full text in the prior revision's §2. Summary of the load-bearing ones:
 
 **Demo machine: MSI laptop, Intel i7-9750H (6C/12T, 2.6 GHz base), 16 GB RAM, GTX 1660 Ti, Windows.**
 
-### 3.1 The number nobody wants to hear
+### 3.1 Throughput on this machine — context, not a target
 
 Effective sustained compute is roughly **5-5.5 cores** once Windows, Docker and thermal throttling take
-their cut. The full stack must share them:
+their cut, and the full stack must share them. Measured, for reference only:
 
-| Configuration | Cores for gateway | Realistic events/sec |
+| Configuration | Cores for gateway | Observed-scale events/sec |
 |---|---|---|
-| Full stack (Kafka + Flink + Cassandra + gateway + driver) | ~0.5-1.0 | **5k-15k** |
-| Peak config (Kafka + gateway + driver) | ~3.0-4.0 | **25k-40k** |
-| Gateway alone, no broker | ~4.5 | 35k-50k |
+| Full stack (Kafka + Flink + Cassandra + gateway + driver) | ~0.5-1.0 | ~5k-15k |
+| Gateway + driver, no broker | ~4.5 | ~35k-50k |
 
-**50k is not demonstrable with the full stack on this machine.** Under the r4 demo posture this is
-acceptable — we are not demonstrating it. It is recorded here so the design write-up is honest.
+**This table is why we do not assert 50k.** It is not a target and not a gap — we make no throughput
+claim (see §1.1). It is recorded so that nobody re-derives a 50k assertion from the design and finds
+later it was never measured. Nothing in the remaining work depends on these numbers.
 
 ### 3.2 The blocker that has NOT gone away
 
@@ -207,16 +209,17 @@ soak, and the seven-decision scale argument. The code is correct and tested; tha
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **WSL2/Docker + Kafka + Cassandra + Flink not working on demo day** | **Critical — sinks two other teams too** | Prove it **this week**, not on demo day. Raise the WSL2 memory cap. Owner: all four teams. |
-| **Measured per-event cost (~55 µs) is double the r3 estimate** | **High** — invalidates any throughput claim | Recorded in §1.1. State it honestly in the design write-up. T6 also removed a 3x handle-construction cost. |
+| **WSL2/Docker + Kafka + Cassandra + Flink not working on demo day** | **Critical — the demo's only single point of failure, and it gates three teams** | Prove it **this week**, not on demo day. Raise the WSL2 memory cap. Owner: all four teams. |
+| **`enable.idempotence` disabled by someone chasing throughput** | **High** — silent duplicates and reordering, and a wrong demo receipt | Named a prohibition in `CONTRACT.md`; effective config asserted at startup. |
 | **Ordering guarantee silently broken** | **High** — wrong drop-off metrics, no error | D12 sticky routing; `sequence` is authoritative; ordering-violation counter in T10a; a test that fails without sticky routing. |
-| **`enable.idempotence` disabled by someone chasing throughput** | **High** — silent duplicates and reordering | Named a prohibition in `CONTRACT.md`; effective config asserted at startup. |
 | **Rate limits silently N× under multi-process** | **High** | Correct only because of D12. T7 has a regression test that fails without it. |
 | **DLQ becomes a plaintext PII store** | **High** | Pipeline order fixed (D6); DLQ carries the post-encryption event; canary tests, not regexes. |
+| **Nothing runs end to end until T3 lands** | **High** | T3 is the top-priority remaining task. Every demo beat depends on it. |
 | Driver and gateway contend for cores | Medium | Separate containers with CPU limits; driver reports *sent*, gateway reports *accepted*. |
 | Spec contradiction (per-event-type topics) | Medium | `SPEC.txt:133` amended as a T2 deliverable. |
 | Flink 30-min watermark vs demo duration | Medium | Driver supports accelerated session time. |
 | *(DB team)* `application_funnel_sessions` PK will exceed 100 MB on a popular job | Medium for DB | `SPEC.txt:149` bucketing advice was not applied. Warn them — our Zipfian traffic triggers it. |
+| ~~Measured per-event cost double the r3 estimate~~ | ~~High~~ **Low** | **Downgraded at r4.1:** it only mattered as a threat to a throughput claim, and we make none. Recorded in §1.1/§3.1 for honesty; no work attached. |
 
 ---
 
@@ -225,17 +228,27 @@ soak, and the seven-decision scale argument. The code is correct and tested; tha
 - Flink / stream processing, recommendation engine, vector DB — Queue team
 - Cassandra access or writes — DB team
 - Autofill DOM SDK — UI team
-- A throughput benchmark harness (T1 reduced to a load client)
 - k6 / Gatling / Locust
 - CloudEvents binary content mode (incompatible with batching)
 - Exactly-once end-to-end (at-least-once + `(source,id)` LWW)
 - An admin UI
 
+**Dropped at r4.1 — throughput:**
+- Any further optimisation toward a throughput target. Correct + tested is the bar.
+- The T1 throughput benchmark (cancelled; the per-event cost was measured directly by T6 instead)
+- The 10-minute soak and the 50k peak assertion
+- The seven-decision scale argument (one paragraph in §1.1, on request only)
+
+**A note on D2 (batching).** Batching was originally justified *entirely* by the 50k target. With that
+target dropped it is no longer a requirement — it is ordinary good API design, matching what every
+analytics ingest API does, and it is described that way. The caps (500 events / 4 MiB) remain a DoS
+defence and are still enforced before allocation.
+
 ---
 
 ## 7. Open questions
 
-1. ~~Is 50k still the number we claim?~~ **CLOSED at r4: no.** The demo does not demonstrate or
+1. ~~Is 50k still the number we claim?~~ **CLOSED at r4.1: no.** The demo does not demonstrate or
    assert 50k. See §1.1 — it is a one-paragraph answer if asked, and no further work is spent on it.
 2. **Who owns the `.wslconfig` change and the WSL2/Docker smoke test?** It gates three teams and is
    now the single point of failure for "the demo works."
