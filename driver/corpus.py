@@ -69,8 +69,16 @@ class CorpusBuilder:
             )
         return self._user_cache[career_site_id]
 
-    def _outcome(self) -> str:
-        r = self.rng.random()
+    def _outcome(self, rng: random.Random) -> str:
+        """Which terminal state this session reaches.
+
+        Takes the RNG as a parameter rather than reading `self.rng`, so a
+        subclass can override it with the same signature. `SkewedCorpus` does
+        exactly that, and an `self`-only signature would be a silent LSP
+        violation: it would work right up until a subclass forgot to override
+        `sessions()` in lockstep with it.
+        """
+        r = rng.random()
         if r < self.drop_off_rate:
             return ABANDONED
         if r < self.drop_off_rate + 0.15:
@@ -88,7 +96,7 @@ class CorpusBuilder:
                 source_channel=self.rng.choice(SOURCE_CHANNELS),
                 job_id=f"job_{self.rng.randrange(10_000, 99_999)}",
                 steps=self.rng.randint(1, 4),
-                outcome=self._outcome(),
+                outcome=self._outcome(self.rng),
                 start_sequence=self._next_sequence(tenant, user),
                 referrer=self.rng.choice(["SEARCH", "RECOMMENDATION", "DIRECT"]),
                 rng=random.Random(f"{tenant}:{user}:{i}"),
