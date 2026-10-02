@@ -698,10 +698,48 @@ def test_concurrent_sequence_tracking_is_exact():
 
 # --- Criterion 9: the cost is measured, not assumed ---------------------------
 
-#: Per-call budget for one hot-path increment, in microseconds. 50k events/sec
-#: is 20ns of wall clock per event, so anything approaching 1us is a third of
-#: the budget for the rest of the request path gone.
-INCREMENT_BUDGET_US = 1.0
+#: Per-call budget for one hot-path increment, in microseconds. An ABSOLUTE
+#: ceiling with headroom, not a target: the same path measures ~0.5 us on an idle
+#: machine and ~1.0 us with three other test workers competing for the same cores,
+#: so a wall-clock assertion AT the measured cost fails on contention rather than on
+#: regression. The regression guard is `INCREMENT_COST_RATIO` below, which is
+#: load-independent. This number only has to sit far enough above the real cost to
+#: stop firing on a busy laptop, and close enough that doing actual work in this
+#: path -- a `render()`, a second lock, an allocation per event -- still trips it.
+INCREMENT_BUDGET_US = 3.0
+
+#: What the hot path may cost relative to a trivial dict lookup measured in the
+#: SAME process at the SAME moment. Contention slows both, so the ratio holds on a
+#: loaded machine; a genuine regression -- work that grows with the registry, a
+#: syscall, a lock taken per event -- moves only the numerator. That is what makes
+#: this the assertion that catches a real slowdown, on any machine, at any load.
+#:
+#: Measured 3.5x-3.8x on an idle i7-9750H, so 10x is roughly 2.6x of headroom
+#: rather than a number picked to be safe. It is loose on purpose in one direction
+#: only: this cannot catch a 10% regression, and no timing assertion can. What it
+#: does catch is a hot path that started doing work -- a `render()` is ~1200x this
+#: baseline, and a second lock or a per-event allocation is a multiple of it.
+INCREMENT_COST_RATIO = 10.0
+
+
+class _CostBaseline:
+    """The reference `INCREMENT_COST_RATIO` is taken against.
+
+    A dict lookup and a comparison on a slotted object: the same SHAPE as the code
+    under test with none of its work, so the ratio measures this registry's overhead
+    rather than the cost of interpreting Python. Deliberately not a clock read or a
+    sleep -- those would measure the scheduler, which is the thing this exists to
+    cancel out.
+    """
+
+    __slots__ = ("_seen",)
+
+    def __init__(self) -> None:
+        self._seen = {"warm": 1}
+
+    def touch(self, key: str, value: int) -> bool:
+        seen = self._seen.get(key)
+        return seen is not None and value == seen
 
 
 def _time_us(fn, calls: int) -> float:
@@ -722,7 +760,33 @@ def _time_us(fn, calls: int) -> float:
     return best
 
 
-def test_increment_path_costs_under_one_microsecond(m):
+def _assert_cheap(per_call_us: float, calls: int) -> None:
+    """Both guards, and the ratio printed either way.
+
+    Called from each budget test rather than inlined three times so the two
+    assertions cannot drift apart -- a test that checked one and not the other
+    would be a quieter test, and the drift is invisible until the day the absolute
+    ceiling is the only thing anyone reads.
+    """
+    baseline = _CostBaseline()
+    baseline.touch("warm", 1)
+    baseline_us = _time_us(lambda: baseline.touch("warm", 2), calls)
+    ratio = per_call_us / baseline_us if baseline_us else float("inf")
+    print(f"baseline: {baseline_us:.3f} us/call, ratio: {ratio:.1f}x")
+
+    assert per_call_us < INCREMENT_BUDGET_US, (
+        f"{per_call_us:.3f} us/call exceeds the {INCREMENT_BUDGET_US} us absolute "
+        f"ceiling (baseline {baseline_us:.3f} us/call)"
+    )
+    assert ratio < INCREMENT_COST_RATIO, (
+        f"{per_call_us:.3f} us/call is {ratio:.1f}x the {baseline_us:.3f} us/call "
+        f"baseline, over the {INCREMENT_COST_RATIO}x budget: this path got more "
+        "expensive relative to a trivial call, which is a regression rather than a "
+        "busy machine"
+    )
+
+
+def test_the_increment_path_stays_cheap(m):
     calls = 100_000
     warm = lambda: m.record_event_accepted(
         "com.careerpage.career.user-registered", sourcechannel="WEB_APP"
@@ -738,24 +802,24 @@ def test_increment_path_costs_under_one_microsecond(m):
     print(f"\nrecord_event_accepted: {per_call_us:.3f} us/call over {calls} calls")
 
     assert after > before, "the loop must not be optimised away"
-    assert per_call_us < INCREMENT_BUDGET_US, f"{per_call_us:.3f} us/call exceeds the {INCREMENT_BUDGET_US} us budget"
+    _assert_cheap(per_call_us, calls)
 
 
-def test_histogram_observation_costs_under_one_microsecond(m):
+def test_histogram_observation_stays_cheap(m):
     calls = 100_000
     per_call_us = _time_us(lambda: m.observe_encryption_latency(0.0004), calls)
     print(f"observe_encryption_latency: {per_call_us:.3f} us/call over {calls} calls")
-    assert per_call_us < INCREMENT_BUDGET_US, f"{per_call_us:.3f} us/call exceeds the {INCREMENT_BUDGET_US} us budget"
+    _assert_cheap(per_call_us, calls)
 
 
-def test_sequence_observation_costs_under_one_microsecond(m):
-    """Same budget as the counters: one sequence check per event, so it is just
-    as hot."""
+def test_sequence_observation_stays_cheap(m):
+    """Same guard as the counters: one sequence check per event, so it is just as
+    hot, and it is the one with a lock on it."""
     calls = 100_000
     m.observe_sequence("/careers/acme", "usr_warm", 1)
     per_call_us = _time_us(lambda: m.observe_sequence("/careers/acme", "usr_warm", 2), calls)
     print(f"observe_sequence: {per_call_us:.3f} us/call over {calls} calls")
-    assert per_call_us < INCREMENT_BUDGET_US, f"{per_call_us:.3f} us/call exceeds the {INCREMENT_BUDGET_US} us budget"
+    _assert_cheap(per_call_us, calls)
 
 
 def test_render_stays_cheap_enough_to_serve(m):
