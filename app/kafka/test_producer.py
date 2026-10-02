@@ -119,17 +119,23 @@ class GatedProducer(FakeProducer):
 
 
 class RecordingMetrics:
-    """The two methods `KafkaSink` is allowed to call."""
+    """The three methods `KafkaSink` could call, so a test can prove which it
+    does. `record_dlq_published` is here precisely so that counting it is
+    *visible* rather than an AttributeError swallowed on the owner thread."""
 
     def __init__(self) -> None:
         self.produce_latencies: list[float] = []
         self.usage: list[tuple[int, int]] = []
+        self.dlq_published = 0
 
     def observe_kafka_produce_latency(self, seconds: float) -> None:
         self.produce_latencies.append(seconds)
 
     def set_buffer_usage(self, used: int, capacity: int) -> None:
         self.usage.append((used, capacity))
+
+    def record_dlq_published(self) -> None:
+        self.dlq_published += 1
 
 
 # --- fixtures -----------------------------------------------------------------
@@ -388,6 +394,25 @@ def test_produce_latency_is_observed_per_record(build, producers):
     assert all(value >= 0.0 for value in metrics.produce_latencies)
 
 
+def test_the_sink_does_not_count_dlq_publication(build):
+    """The sink knows its topic; the *wrapper* knows what a DLQ record is.
+
+    Counting `dlq_published` in both places does not fail any single test -- it
+    doubles every DLQ event in the metric forever, and a chaos demo that reports
+    "DLQ caught exactly 5%" off a counter reading 10% is the worst possible place
+    to discover it. One owner: the wrapper.
+    """
+    metrics = RecordingMetrics()
+    sink = build(metrics=metrics)
+    sink.sink_dlq("/careers/acme_8921", b"{}")
+    sink.close()
+
+    assert metrics.dlq_published == 0
+    # The record WAS published -- this is about who counts it, not about a lost
+    # publication.
+    assert len(metrics.produce_latencies) == 1
+
+
 # =============================================================================
 # 5. shutdown drains
 # =============================================================================
@@ -417,6 +442,36 @@ def test_a_sink_after_close_refuses_rather_than_accepting_into_the_void(build):
     sink.close()
     with pytest.raises(SinkUnavailable):
         sink.sink(TOPIC_RAW, "k", b"v")
+
+
+def test_the_owner_thread_is_a_daemon(build):
+    """Daemon, so a process that never reaches its shutdown hook still exits.
+
+    `close()` is the correct path and drains properly, but "correct path" is not
+    a property a process has on SIGKILL, on an unhandled exception in a
+    neighbouring thread, or when a test forgets to close. A non-daemon owner
+    thread turns any of those into a wedged process: the suite's assertions all
+    pass and then the interpreter never returns, which is exactly the failure
+    mode this test exists to make impossible to reintroduce.
+    """
+    sink = build()
+    try:
+        owners = [t for t in threading.enumerate() if t.name.startswith("kafka-producer-")]
+        assert len(owners) == 1, f"expected one producer owner thread, found {owners}"
+        assert owners[0].daemon, "a non-daemon owner thread can wedge process exit"
+    finally:
+        sink.close()
+
+
+def test_close_joins_the_owner_thread(build):
+    """`close()` returning with the thread still running means the drain is a
+    lie -- records would be produced after the process decided it was done."""
+    sink = build()
+    for i in range(50):
+        sink.sink(TOPIC_RAW, f"k{i}", b"payload")
+    sink.close()
+
+    assert not [t for t in threading.enumerate() if t.name.startswith("kafka-producer-")]
 
 
 # =============================================================================

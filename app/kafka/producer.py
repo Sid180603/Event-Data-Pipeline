@@ -302,9 +302,11 @@ class KafkaSink:
             self._produced += 1
         metrics = self._metrics
         if metrics is not None:
+            # Produce latency only. `dlq_published` is deliberately NOT counted
+            # here: the sink knows its topic, but the counter belongs to the
+            # wrapper that knows what a DLQ record IS, and counting it in both
+            # places would double every DLQ event for the rest of the system's life.
             metrics.observe_kafka_produce_latency(self._clock() - record.enqueued_at)
-            if record.topic == self._dlq_topic:
-                metrics.record_dlq_published()
 
     def _failed_record(self, topic: str, error: Exception) -> None:
         with self._lock:

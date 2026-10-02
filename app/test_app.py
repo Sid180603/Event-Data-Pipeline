@@ -30,6 +30,7 @@ import logging
 import pathlib
 import subprocess
 import sys
+import textwrap
 
 import jwt
 import msgspec
@@ -555,6 +556,77 @@ def test_a_real_sink_is_built_when_none_is_injected(settings, metrics, monkeypat
     assert app.state.sink.inner is not None
     assert built and built[0]["bootstrap.servers"] == "broker:9092"
     assert built[0]["enable.idempotence"] is True
+
+
+def test_a_process_that_built_the_real_sink_actually_exits(settings):
+    """Run a real process that builds a real `KafkaSink`, serve one request, stop
+    the app, and then require the interpreter to return.
+
+    Two things make an exit hang, and neither is visible from inside the process:
+    a non-daemon owner thread, and a `close()` that returns without joining it.
+    `app/kafka/test_producer.py` pins each of those directly against the thread
+    object; this is the end-to-end version, because the failure it guards against
+    is a *green suite that never finishes* -- which reads as progress and is
+    worse than a red one.
+
+    The broker is stubbed: what is under test is process lifecycle, not librdkafka.
+    """
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import sys
+                from fastapi.testclient import TestClient
+                from app.auth import Credential
+                from app.config import Settings
+                import app.kafka.producer as producer_module
+                from app.main import create_app
+
+                class _StubProducer:
+                    def __init__(self, config): self.config = config
+                    def produce(self, topic, *, key=None, value=None, on_delivery=None): pass
+                    def poll(self, timeout=None): return 0
+                    def flush(self, timeout=None): return 0
+                    def __len__(self): return 0
+
+                producer_module.build_producer = _StubProducer
+
+                settings = Settings(
+                    kafka_bootstrap_servers="broker:9092",
+                    master_secret=b"test-only-master-secret-do-not-use!",
+                    jwt_public_key_pem=sys.stdin.read(),
+                    jwt_algorithm="EdDSA",
+                    jwt_audience="career-api",
+                )
+                app = create_app(
+                    credentials=(
+                        Credential(
+                            credential_id="cred_a_web",
+                            career_site_id="acme_8921",
+                            source_channel="WEB_APP",
+                        ),
+                    ),
+                    settings=settings,
+                    operator_key=b"test-only-operator-key",
+                )
+                with TestClient(app) as client:
+                    assert client.get("/healthz").status_code == 200
+                # Falling off the end here must be enough: no os._exit, no
+                # explicit join. If the owner thread can hold the process open,
+                # this line is where it would.
+                """
+            ),
+        ],
+        cwd=repo,
+        input=settings.jwt_public_key_pem,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, f"the process did not exit cleanly:\n{result.stderr}"
 
 
 def test_audit_records_reach_the_injected_sink_on_a_denial(client, audits, caplog):
