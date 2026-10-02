@@ -48,7 +48,15 @@ def kafka_producer_config(
         "retries": 2_147_483_647,
         "max.in.flight.requests.per.connection": 5,
         "compression.type": "zstd",
-        "compression.zstd.level": 3,
+        # `compression.level`, NOT `compression.zstd.level`. The name that reads
+        # correctly is not a librdkafka property -- `Producer()` raises
+        # `_INVALID_ARG` on it, so the gateway does not start at all rather than
+        # degrading. The level is not codec-scoped in librdkafka: one knob covers
+        # every codec, and the two spellings of the codec itself (`compression.type`
+        # and `compression.codec`) are accepted as aliases. Pinned by
+        # `test_every_published_key_is_a_property_librdkafka_has`, which builds a
+        # real client per key.
+        "compression.level": 3,
         "batch.size": 262_144,
         "linger.ms": 10,
         "queue.buffering.max.kbytes": 65_536,

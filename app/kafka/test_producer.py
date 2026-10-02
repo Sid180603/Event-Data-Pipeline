@@ -2,11 +2,15 @@
 
 What is pinned here, and why each one is a test rather than a comment:
 
-1. **The producer config is `app.config.kafka_producer_config()` verbatim.** The
-   config is not something this module gets to choose: `enable.idempotence`
-   being off would produce duplicates and reorderings on retry with no client
-   raising anything, which is the one failure mode the ordering and dedup claims
-   in the plan cannot survive.
+1. **The producer config is `app.config.kafka_producer_config()` verbatim, AND
+   librdkafka accepts every key in it.** The config is not something this module
+   gets to choose: `enable.idempotence` being off would produce duplicates and
+   reorderings on retry with no client raising anything, which is the one failure
+   mode the ordering and dedup claims in the plan cannot survive. And a dict of
+   property names is only correct if the library has heard of them -- a name that
+   looks right and does not exist makes `Producer()` raise `_INVALID_ARG`, so the
+   gateway does not start. Comparing the dict against `app.config` is a tautology
+   that cannot catch that, which is why one test here builds a real client.
 2. **A dedicated thread owns the client and calls `poll()`.** The async request
    path must only enqueue, or a broker round-trip lands on the event loop.
 3. **A full queue is a `503`, not a block and not a drop.** The record that did
@@ -20,7 +24,8 @@ What is pinned here, and why each one is a test rather than a comment:
 
 Nothing here needs a broker: the fake client below is a `confluent_kafka`
 stand-in that keeps the same three calls we actually make -- `produce`,
-`poll`, `flush`.
+`poll`, `flush`. Constructing a real `Producer` also needs no broker -- it does
+not connect until it is asked to -- so the config check is a real client too.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ import time
 from typing import Any
 
 import pytest
+from confluent_kafka import Producer
+from confluent_kafka import KafkaException
 
 from app.config import TOPIC_DLQ, TOPIC_RAW, kafka_producer_config
 from app.ingest.pipeline import Sink, SinkUnavailable
@@ -191,6 +198,36 @@ def test_idempotence_is_on_and_nothing_is_left_to_a_default(build, producers):
         assert config["queuing.strategy"] == "fifo"
     finally:
         sink.close()
+
+
+def test_the_gateway_can_actually_construct_a_producer():
+    """The invariant that matters: `app.main` hands this dict to `Producer()`.
+
+    Not a comparison against `app.config` -- that would pass whatever the dict
+    contains, including a key the library has never heard of. `Producer()` is the
+    only authority, it needs no broker to be constructed, and a key it rejects is
+    not a warning: it is a gateway that will not start.
+    """
+    config = kafka_producer_config("broker:9092")
+    try:
+        Producer(config)
+    except KafkaException as exc:
+        pytest.fail(f"librdkafka refuses the published producer config: {exc}\n{config}")
+
+
+def test_every_published_key_is_a_property_librdkafka_has():
+    """Names the offender, which the whole-dict check above cannot.
+
+    A property name that reads correctly is the whole hazard: `compression.zstd.level`
+    is exactly what the config carried, librdkafka has no such property, and nothing
+    in the suite noticed for the life of the project. The correct name
+    (`compression.level`) is less obvious than the one it replaced.
+    """
+    for key, value in kafka_producer_config("broker:9092").items():
+        try:
+            Producer({key: value})
+        except KafkaException as exc:
+            pytest.fail(f"librdkafka has no property {key}={value!r}: {exc}")
 
 
 # =============================================================================
