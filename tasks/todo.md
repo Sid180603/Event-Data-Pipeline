@@ -33,13 +33,50 @@ live session · raw-vs-encrypted · kill-gateway receipt · 5% DLQ · tenant flo
 | T8c | fault injection (exact bad-event count + flood) | ✅ | `a157f63` |
 | — | driver invariant pins (LSP + two-pass docs) | ✅ | `f987cff` |
 | T3 | application factory, Kafka sink, compose stack | ✅ | `bc2fc83` |
-| R1 | producer DLQ-count fix + exit guard | ⬜ | — (uncommitted `M app/kafka/producer.py`) |
-| R2 | driver replay + main entry | ⬜ | — |
-| R3 | verification oracle | ⬜ | — |
-| R4 | chaos scripts + demo runbook | ⬜ | — |
-| R5 | live view + inspector + `make demo` | ⬜ | — |
-| R6 | load client + producer tuning doc | ⬜ | — |
-| R7 | contract and handoff close-out | ⬜ | — |
+| R1 | producer DLQ-count fix + exit guard | ✅ | `6e749f9` |
+| R2 | driver replay + main entry | ✅ | `67c0678` |
+| R3 | verification oracle | ✅ | `6ef3002` |
+| R5 | live view + inspector + `make demo` | ✅ | `7d297bf` |
+| R6 | load client + producer tuning doc | ✅ | `efd3bd1` |
+| R4 | chaos scripts + demo runbook | 🔄 | in flight |
+| R7 | contract and handoff close-out | ✅ | `d8c0758`, `df01029` |
+
+### Defects found while building, and fixed
+
+Every row here was found by running something, not by reading it. None was in the plan.
+
+| Defect | Consequence had it shipped | Fix |
+|---|---|---|
+| `app/config.py` published `compression.zstd.level`, which is not a librdkafka property | `Producer()` raises `_INVALID_ARG`; **the gateway could not start at all** | `6f0320e` |
+| `tools/observe.py` had no `__main__` guard | `make observe` and `make demo`'s live screen printed **nothing and exited 0** — a blank demo beat reporting success | `003ca4a` |
+| `contracts/event.schema.json` shipped a bare `$ref` with no `$defs` | the published egress schema **validated nothing** for the Queue and DB teams | `167a1a9` |
+| `app/dlq/envelope.py`, `app/ingest/` and `CONTRACT.md` claimed the DLQ is never plaintext | false: a **validation-stage** rejection is DLQ'd as plaintext, deliberately. A PII claim three teams build retention policy on | `108410b`, `4f9b9ab`, `d8c0758` |
+| the driver cut batches by cap only, so the credential's channel was stamped on every event in a request | the demo's per-event `sourcechannel` was fiction | `a4a1789` |
+| `httpx` was a dev-only dependency | `import httpx` fails in the compose driver container, which installs only `[project].dependencies` | `a4a1789` |
+| no `.gitattributes` | CRLF checkout; every `.sh` and the `Makefile` fail in WSL2 with `bad interpreter` | `14b26df` |
+| the hot-path cost assertion fired on contention, not regression | flaky red builds | `6f02d27`, `dac133a` |
+| `app/config.py` and `app/ingest/` still described `INGRESS_EVENT_BYTES` as provisional and `MAX_EVENT_BYTES` as unreachable | both false once measured | `d8c0758`, `4f9b9ab` |
+
+### Open items for the team — not for an agent
+
+1. **The top 297 B of the 48 KiB ingress cap is a dead zone.** Measured: an event whose
+   bulk sits in the five encrypted PII fields inflates past the 64 KiB ceiling (49,152 B
+   ingress → 65,923 B) and is refused per-event to the DLQ. The largest that fits is
+   48,855 B. `INGRESS_EVENT_BYTES` was deliberately **not** changed — it is a published
+   contract value and lowering it changes what three teams may send. Practical rule
+   meanwhile: keep the encrypted fields small.
+2. **`STICKY_ROUTING` is read by nothing.** `Settings.sticky_routing` parses the env var
+   and no code path consults it; there is no affinity layer in front of uvicorn's
+   `--workers`. A tenant's effective rate budget is therefore up to N× the configured
+   rate. Partitioning is unaffected (the Kafka key is derived) and the flood beat's
+   "the other 499 are unaffected" still holds, but no claim about the *exact* enforced
+   rate is supportable. Closing this needs an L7 balancer and is outside this slice.
+   Corrected in `923abd1` and in `CONTRACT.md` §6.
+3. **Unverified on real infrastructure.** No Docker, broker or WSL distro on the build
+   machine. `make demo`, `make chaos` and every reconciliation have never been executed
+   end to end. The chaos scripts were exercised only with a stubbed `docker`.
+4. **The demo has never been run in front of anyone.** Everything above is a component
+   being correct, not a demo being reliable.
 
 ---
 
