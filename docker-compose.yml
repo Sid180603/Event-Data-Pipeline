@@ -132,6 +132,15 @@ services:
     env_file: .env
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
+      # STICKY_ROUTING is READ BY NOTHING. `Settings.sticky_routing` parses it and no
+      # code path consults the result: there is no affinity layer in front of uvicorn's
+      # `--workers`, so a (tenant, user) pair reaches every worker and a tenant's
+      # effective rate budget is up to GATEWAY_WORKERS times the configured rate.
+      # Left set because it costs nothing and names the intent; do not read it as
+      # working. Partitioning is unaffected -- the Kafka key is derived, so the
+      # partition is deterministic -- and the flood beat's "the other 499 are
+      # unaffected" still holds, because the shed is per tenant per process either
+      # way. What is NOT supportable is a claim about the exact enforced rate.
       STICKY_ROUTING: "1"
       # Deliberately NOT set: WORKER_ID. uvicorn cannot give each `--workers` child a
       # different value, and app.metrics falls back to host:pid, which distinguishes
