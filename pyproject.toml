@@ -23,7 +23,7 @@ dev = ["pytest>=8", "httpx>=0.27"]
 include = ["app*", "contracts*", "driver*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "contracts", "app", "driver"]
+testpaths = ["tests", "contracts", "app", "driver", "tools", "bench"]
 python_files = ["test_*.py"]
 addopts = "-q"
 markers = [
