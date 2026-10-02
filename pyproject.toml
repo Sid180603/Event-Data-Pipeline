@@ -14,13 +14,18 @@ dependencies = [
     "cryptography>=42",
     "pyjwt>=2.8",
     "confluent-kafka>=2.3",
+    # Runtime, not dev: `driver/replay.py` is the driver's HTTP client and ships in
+    # the same image as the gateway. The compose driver service runs `pip install -e .`,
+    # which installs this list and not `[dev]`, so a dev-only httpx is an
+    # ImportError on the demo machine and nowhere else.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27"]
+dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "contracts*", "driver*"]
+include = ["app*", "contracts*", "driver*", "tools*", "bench*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "contracts", "app", "driver", "tools", "bench"]

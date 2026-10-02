@@ -17,18 +17,15 @@ comment because each of them fails *quietly* if broken:
 * **One tenant per request.** A batch spanning two tenants is a 403. The corpus
   already buffers per tenant (`driver/corpus.py`); this module refuses a mixed
   batch rather than trusting that.
-* **The batch is cut by the caps only -- deliberately NOT by channel**, and the
-  reason is the whole subtlety of this module. A request carries one credential,
+* **One channel per request, cut contiguously.** A request carries one credential,
   and the credential fixes `sourcechannel` for every event in it
-  (`app.auth.authorize_batch`), so a per-channel split is the only way to keep each
-  event's own channel label. It is refused because the corpus gives *every* user a
-  session on *every* channel, so a per-channel split would deliver a user's WEB_APP
-  events, then their MOBILE_APP events, then their partner-webhook ones --
-  reordering a journey that CONTRACT.md section 6 promises to produce in order, and
-  that the gateway counts as an ordering violation. Ordering is a contract
-  guarantee; the channel label is not claimed anywhere. So the cost is paid in the
-  label: each request is labelled with the channel of its first event, and the
-  gateway records the credential's channel for all of it.
+  (`app.auth.authorize_batch`) -- the body is never the source of truth about
+  which app is calling. So a batch is cut wherever the channel changes, which
+  keeps every event's own channel label true. The cut is a contiguous run of the
+  stream, never a grouping by channel, so a user's journey is still delivered in
+  `sequence` order across the several requests it now takes. The price is more,
+  smaller requests, paid knowingly: a wrong channel label is a wrong dashboard,
+  and the dashboard is the demo.
 * **The body is encoded once and reused verbatim.** CONTRACT.md section 5 makes a
   stable `id` across retries the client's obligation. Re-encoding on a retry would
   mint a new `id`, and a retry that changes `id` is a duplicate, not a retry. So
@@ -257,8 +254,8 @@ class PlannedBatch:
 
     `channel` is the channel this request's CREDENTIAL is registered for, and it
     is what every event in the batch is recorded as on the topic. It is taken from
-    the batch's first event rather than required to be uniform -- see the module
-    docstring for why the caps and not the channel are what cut a batch.
+    the batch's first event, which is only a fair reading because the batcher cuts
+    wherever the channel changes -- see the module docstring.
     """
 
     tenant: str
@@ -303,10 +300,9 @@ def plan_batches(
     asking for 5,000 events per request does not get a run full of 413s; it gets
     500-event requests, which is the most the gateway will ever take.
 
-    Cut by the caps and by nothing else -- notably not by channel. See the module
-    docstring; the short version is that a per-channel split reorders every user
-    who applied on more than one channel, and the corpus gives every user a
-    session on every channel.
+    Cut by the caps, by the channel, and by nothing else. The cap cut is a
+    contiguous run of the stream, and so is the channel cut -- neither reorders a
+    user's journey. See the module docstring.
     """
     if max_events < 1:
         raise ValueError(f"max_events must be at least 1, got {max_events}")
@@ -352,7 +348,17 @@ def _channel_of(event: dict) -> str:
 def _chunks(
     events: Sequence[dict], max_events: int, max_bytes: int
 ) -> Iterator[tuple[list[dict], list[bytes]]]:
-    """`(events, encoded)` runs, cut so each body is within both caps.
+    """`(events, encoded)` runs, cut so each body is within both caps AND carries
+    one channel.
+
+    A request's credential fixes `sourcechannel` for every event in it, so a run
+    that spans two channels would label the second one with the first one's. The
+    cut at a channel change is *contiguous* -- the stream is walked once and never
+    reordered -- which is what keeps a user's `sequence` intact across the several
+    requests their multi-channel journey now takes. Grouping the batch by channel
+    instead would be one loop instead of a check, and would deliver a user's
+    WEB_APP events, then their MOBILE_APP ones, then their partner's, which
+    CONTRACT.md section 6 promises not to do and the gateway counts as a violation.
 
     Accumulates the per-event encodings rather than re-encoding the buffer to
     measure it: the body is built once per planned batch (see `PlannedBatch`), and
@@ -363,13 +369,24 @@ def _chunks(
     """
     events_here: list[dict] = []
     encoded_here: list[bytes] = []
+    channel_here: str | None = None
     total = _BRACKETS
     for ev in events:
         encoded = msgspec.json.encode(ev)
         size = len(encoded)
-        if events_here and (len(events_here) >= max_events or total + size + _COMMA > max_bytes):
+        channel = ev.get("sourcechannel")
+        if events_here and (
+            channel != channel_here
+            or len(events_here) >= max_events
+            or total + size + _COMMA > max_bytes
+        ):
             yield events_here, encoded_here
             events_here, encoded_here, total = [], [], _BRACKETS
+        if not events_here:
+            # Whatever cut the previous run, this one is labelled by its own first
+            # event -- a stale `channel_here` here would make every event after the
+            # cut look like a channel change and yield one event per request.
+            channel_here = channel
         total += size + (_COMMA if events_here else 0)
         if total > max_bytes:
             raise ValueError(

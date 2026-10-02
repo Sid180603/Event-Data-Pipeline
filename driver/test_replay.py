@@ -102,9 +102,19 @@ def _one_batch(sessions: int = 40) -> list[dict]:
 
 
 def _events(count: int) -> list[dict]:
-    """The first `count` events of one corpus batch, so a test can state an exact
-    size. A session is 3-6 events, so counting SESSIONS does not count events."""
-    return _one_batch(40)[:count]
+    """The first `count` events of one corpus batch, all on ONE channel.
+
+    A session is 3-6 events, so counting SESSIONS does not count events. The
+    channel is flattened to the first event's because the batcher also cuts on a
+    channel change, and a test that is about retries or the byte cap needs to state
+    an exact REQUEST count as well as an exact event count. The channel cut has its
+    own tests (`test_a_request_carries_one_channel_so_every_event_keeps_its_own`).
+    """
+    events = _one_batch(40)[:count]
+    channel = events[0]["sourcechannel"]
+    for ev in events[1:]:
+        ev["sourcechannel"] = channel
+    return events
 
 
 def _padded(event: dict, size: int) -> dict:
@@ -184,7 +194,7 @@ def test_every_event_of_a_batch_lands_in_exactly_one_planned_batch():
 
 
 # =============================================================================
-# 2. one tenant per request, and the deliberate not-one-channel
+# 2. one tenant per request, and one channel per request
 # =============================================================================
 
 
@@ -204,31 +214,35 @@ def test_a_multi_tenant_batch_is_refused_before_anything_is_sent():
         list(plan_batches(mixed))
 
 
-def test_requests_are_not_split_by_channel():
-    """The deliberate trade, pinned so a later 'fix' has to argue with it.
+def test_a_request_carries_one_channel_so_every_event_keeps_its_own():
+    """A request carries one credential and the credential fixes `sourcechannel` for
+    the whole request (`app.auth.authorize_batch`) -- the body is never the source of
+    truth about which app is calling. So a request mixing channels stamps all of
+    them with its first event's channel, and the topic's channel split becomes
+    fiction, which is the one thing the three per-source payload shapes in
+    `driver/sources.py` exist to prevent.
 
-    A request carries one credential and the credential fixes `sourcechannel` for
-    the whole request (`app.auth.authorize_batch`), so a per-channel split is the
-    only way to keep every event's own channel label. It is refused here because
-    the corpus gives every user a session on every channel, so a per-channel split
-    delivers each user's WEB_APP events, then their MOBILE_APP events, then their
-    third-party ones -- reordering a journey that CONTRACT.md section 6 promises to
-    produce in order, and that the gateway counts as a violation.
-    `test_the_planned_requests_keep_a_users_sequence_in_order` is the other half
-    of this argument."""
+    Hence the cut at every channel change. It is a *contiguous* cut, not a grouping
+    one: the stream is never reordered, so a user's journey still arrives in
+    `sequence` order, and the request count grows instead. More, smaller requests is
+    the right thing to pay against a wrong label.
+    `test_the_planned_requests_keep_a_users_sequence_in_order` is the other half."""
     batch = _one_batch(200)
     assert {ev["sourcechannel"] for ev in batch} == {
         "WEB_APP",
         "MOBILE_APP",
         "THIRD_PARTY_SERVICE",
     }
-    # The ceilings as the only cuts, so the batch count is decided by the caps and
-    # not by this test's own arithmetic.
+    # The ceilings raised, so the count is decided by the channels and not by this
+    # test's own arithmetic.
     planned = list(
         plan_batches(batch, max_events=MAX_EVENTS_PER_BATCH, max_bytes=MAX_BATCH_BYTES)
     )
-    assert len(planned) == 1, "the driver split a batch by channel"
-    assert planned[0].channel == batch[0]["sourcechannel"]
+    assert len(planned) > 1, "a mixed-channel batch went out under one credential"
+    for one in planned:
+        assert {ev["sourcechannel"] for ev in one.events} == {one.channel}
+    # And the reason the cut is allowed to exist at all.
+    assert [ev["id"] for one in planned for ev in one.events] == [ev["id"] for ev in batch]
 
 
 def test_a_planned_batch_names_the_channel_its_credential_is_registered_for():
@@ -245,14 +259,14 @@ def test_a_planned_batch_names_the_channel_its_credential_is_registered_for():
 def test_the_planned_requests_keep_a_users_sequence_in_order():
     """Cutting a batch into several requests is only safe if the cut cannot
     interleave one user's journey, and the order that matters is the order the
-    requests go out in. The cap cut is a contiguous run of the stream, so it cannot;
-    and there is deliberately no channel cut -- see
-    `test_requests_are_not_split_by_channel`, which is the other half of this
-    argument.
+    requests go out in. Every cut `plan_batches` makes -- the cap cut and the
+    channel cut -- is a contiguous run of the stream, so neither can; see
+    `test_a_request_carries_one_channel_so_every_event_keeps_its_own`, which is
+    the other half of this argument.
 
     Scoped to one tenant because the corpus flushes each tenant's tail only at the
     end (`CorpusBuilder.batches`), so tenant B's last events are delivered after
-    tenant A's -- which is why the cap is per request rather than global."""
+    tenant A's -- which is why the cut is per request rather than global."""
     tenant = TENANTS[0]
     delivered: dict[str, list[int]] = {}
     for batch in _corpus(career_site_ids=[tenant]).batches(300, max_events=10_000):
