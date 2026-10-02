@@ -20,9 +20,27 @@ MAX_BATCH_BYTES = 4 * 1024 * 1024  # 4 MiB, enforced before allocation (H9)
 # expands ciphertext ~33% plus nonce+tag per field (plan G2).
 MAX_EVENT_BYTES = 64 * 1024
 
-#: Ingress cap. Provisional: 48 KiB plaintext, which with base64 expansion and
-#: five encrypted fields lands just under MAX_EVENT_BYTES. T6 measures the real
-#: figure and this becomes a measured constant rather than an estimate.
+#: Ingress cap: 48 KiB plaintext per event, refused with 413 at the batch level.
+#:
+#: MEASURED, not estimated (`app/test_config.py`, which pushes a cap-sized event
+#: through the real pipeline and reads the encrypted event's length off the sink).
+#: The measurement found the cap is NOT sufficient for every event, which is why
+#: the comment that used to live here -- "lands just under MAX_EVENT_BYTES" --
+#: was wrong and has been replaced rather than restated:
+#:
+#: * bulk in a field nothing encrypts (`client_metadata`, `recommended_job_ids`,
+#:   `subject`): 49,152 B in -> 49,380 B out, 16,156 B of headroom;
+#: * bulk spread across all five encrypted fields: 49,152 B in -> 65,923 B out,
+#:   i.e. 387 B OVER MAX_EVENT_BYTES. The largest fully-encrypted ingress event
+#:   that still fits is 48,855 B, so the top 297 B of this cap is admitted and
+#:   then refused per-event with `OVERSIZED`.
+#:
+#: So the pipeline's own claim that this cap makes MAX_EVENT_BYTES "unreachable
+#: by construction" holds for the first shape and not for the second. The cap is
+#: deliberately left at 48 KiB: it is a published contract value, changing it
+#: changes what clients may send, and an oversized event is refused rather than
+#: admitted to the topic either way. The gap is documented in
+#: `contracts/CONTRACT.md`'s limits table.
 INGRESS_EVENT_BYTES = 48 * 1024
 
 # --- Kafka (plan D11) --------------------------------------------------------
