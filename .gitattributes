@@ -1,0 +1,13 @@
+# The running system is WSL2/Linux; the editing machine is Windows with
+# core.autocrlf=true. Without this, git checks out the shell scripts and the
+# Makefile with CRLF and Linux refuses to run them:
+#
+#   /bin/sh^M: bad interpreter
+#
+# which fails on the demo machine and nowhere else -- the worst place to find it.
+# `text=auto` normalises on commit (the blobs are already LF); `eol=lf` makes the
+# working tree LF on Windows too, so what is edited is what runs.
+* text=auto eol=lf
+
+# Nothing in this repo is binary, so nothing gets the `binary` treatment, and a
+# `.png` added later should be an explicit decision rather than a silent one.
