@@ -126,8 +126,18 @@ def generate_schema_json() -> str:
     msgspec has no pretty-printer for a schema object, and this is a build step
     run by `python -m contracts.gen_schema`, not a hot path -- so stdlib json is
     the right tool here. The hot path is `decode_batch`, which is msgspec.
+
+    The `components` half is published alongside the root, and dropping it was a
+    real defect: the file was `{"$ref": "#/$defs/CloudEvent"}` and nothing else, so
+    the reference dangled. Every consumer of this schema -- the Queue team's Flink
+    deserialiser, the DB team's mapper, any editor or validator -- resolves
+    references, and a document that cannot resolve is a document that validates
+    nothing while looking like a contract. `contracts/ingress.py`'s generator
+    already emitted both halves; this one did not.
     """
-    schemas, _components = msgspec.json.schema_components(
+    schemas, components = msgspec.json.schema_components(
         [CloudEvent], ref_template="#/$defs/{name}"
     )
-    return json.dumps(schemas[0], indent=2)
+    document = dict(schemas[0])
+    document["$defs"] = components
+    return json.dumps(document, indent=2)

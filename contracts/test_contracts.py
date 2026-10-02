@@ -270,6 +270,45 @@ def test_the_ingress_schema_is_self_contained():
     assert not any(p.endswith("_enc") or p == "user_id_pseudo" for p in props)
 
 
+def _local_refs(node) -> list[str]:
+    """Every `#/$defs/...` reference in a JSON document, at any depth."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            found.append(ref[len("#/$defs/") :])
+        for value in node.values():
+            found.extend(_local_refs(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_local_refs(value))
+    return found
+
+
+@pytest.mark.parametrize("filename", ["event.schema.json", "ingress.schema.json"])
+def test_every_published_schema_resolves_its_own_references(filename):
+    """Both files are published contracts that other teams load standalone.
+
+    A `$ref` into a `$defs` block that was not published is a document that
+    validates nothing, and it is not a warning at load time -- `jsonschema` raises
+    on resolve and the consumer's first move is to stop trusting the file. The
+    ingress schema has had this guard since it was written; the egress one shipped
+    as a bare `{"$ref": "#/$defs/CloudEvent"}` with no `$defs` at all, because
+    `generate_schema_json` discarded the components msgspec handed it.
+    """
+    path = HERE / filename
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    defs = doc.get("$defs", {})
+
+    refs = _local_refs(doc)
+    assert refs, f"{filename} references nothing — is it still the schema we think?"
+    dangling = sorted({ref for ref in refs if ref not in defs})
+    assert not dangling, (
+        f"{filename} has $ref(s) into $defs it does not define: {dangling}. "
+        "Regenerate with `python -m contracts.gen_schema`."
+    )
+
+
 def test_ingress_and_egress_candidate_shapes_are_different():
     """They must not be conflated: one struct for both directions means a client
     can post nothing at all."""

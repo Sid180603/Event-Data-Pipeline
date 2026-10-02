@@ -1,3 +1,396 @@
 {
-  "$ref": "#/$defs/CloudEvent"
+  "$ref": "#/$defs/CloudEvent",
+  "$defs": {
+    "CloudEvent": {
+      "title": "CloudEvent",
+      "description": "A CloudEvent. `type` is an enum, so msgspec rejects unknown types.\n\n    Extension attribute names carry no underscores: CloudEvents requires\n    lower-case [a-z0-9] only (r3 error E2).",
+      "type": "object",
+      "properties": {
+        "specversion": {
+          "enum": [
+            "1.0"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "com.careerpage.career.application-abandoned",
+            "com.careerpage.career.application-draft-saved",
+            "com.careerpage.career.application-started",
+            "com.careerpage.career.application-step-completed",
+            "com.careerpage.career.application-submitted",
+            "com.careerpage.career.job-viewed",
+            "com.careerpage.career.job-wishlisted",
+            "com.careerpage.career.user-logged-in",
+            "com.careerpage.career.user-registered"
+          ]
+        },
+        "time": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/Data"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dataschema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "datacontenttype": {
+          "type": "string",
+          "default": "application/json"
+        },
+        "keyversion": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sourcechannel": {
+          "anyOf": [
+            {
+              "enum": [
+                "MOBILE_APP",
+                "THIRD_PARTY_SERVICE",
+                "WEB_APP"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "referrertype": {
+          "anyOf": [
+            {
+              "enum": [
+                "DIRECT",
+                "RECOMMENDATION",
+                "SEARCH",
+                "THIRD_PARTY_WEBHOOK"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "completionmethod": {
+          "anyOf": [
+            {
+              "enum": [
+                "HYBRID",
+                "MANUAL",
+                "RESUME_AUTOFILL"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "partitionkey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "specversion",
+        "id",
+        "source",
+        "type",
+        "time",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Data": {
+      "title": "Data",
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/CandidateMetadata"
+        },
+        "event_payload": {
+          "$ref": "#/$defs/EventPayload"
+        }
+      },
+      "required": [
+        "candidate",
+        "event_payload"
+      ]
+    },
+    "CandidateMetadata": {
+      "title": "CandidateMetadata",
+      "type": "object",
+      "properties": {
+        "user_id_pseudo": {
+          "type": "string"
+        },
+        "email_hmac": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "email_enc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "phone_enc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alternate_phone_enc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name_enc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gender_enc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "experience_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "EXPERIENCED",
+                "FRESHER"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "years_of_experience": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "education_degree": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "education_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "user_id_pseudo"
+      ],
+      "additionalProperties": false
+    },
+    "EventPayload": {
+      "title": "EventPayload",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "step_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "step_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "completion_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "HYBRID",
+                "MANUAL",
+                "RESUME_AUTOFILL"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "time_spent_on_step_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "total_application_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommended_job_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "client_metadata": {
+          "type": "object",
+          "default": {}
+        }
+      },
+      "required": [
+        "job_id",
+        "session_id"
+      ],
+      "additionalProperties": false
+    }
+  }
 }
