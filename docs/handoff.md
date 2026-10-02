@@ -284,6 +284,9 @@ from a document, because there is not one.
 ## 7. Open questions — things we could not resolve from the code
 
 Each of these is a real gap, not a placeholder. None of them has been papered over in the contract.
+Item 4 was open when this file was written and has since been fixed by another slice — it is left in
+the list, marked, because a handoff that silently drops a resolved question is indistinguishable from
+one that never had it.
 
 1. **`event.schema.json` is unresolvable standalone.** `contracts/cloudevent.py: generate_schema_json`
    drops the `$defs` components msgspec returns. Fix is one line in a file this slice does not own.
@@ -303,10 +306,10 @@ Each of these is a real gap, not a placeholder. None of them has been papered ov
    publish whichever you choose.** **Owner: the three consumer teams**, UI most affected, because UI
    is the team that fills every candidate field. The number to argue from is in contract §2; the
    measurement that produces it is `python -m pytest app/test_config.py -s -q`.
-4. **`app/ingest/__init__.py`'s module docstring still says "the DLQ carries the post-encryption
-   event."** That is the claim this slice was asked to correct, and it is corrected in
-   `app/dlq/envelope.py`, `app/ingest/pipeline.py` and contract §4 — but the package docstring was
-   not this slice's file and still contradicts them. **Owner: whoever owns `app/ingest/__init__.py`.**
+4. **~~`app/ingest/__init__.py`'s docstring contradicted the DLQ truth.~~ RESOLVED.** It used to
+   say flatly "the DLQ carries the post-encryption event"; it now carries the same
+   validate-stage exception as `app/dlq/envelope.py`, `app/ingest/pipeline.py` and contract §4. Four
+   places now agree, which is the number of places that had to agree.
 5. **The un-acked loss window is unmeasured.** §3 of the contract names the three bounds that shape it
    (`PRODUCER_QUEUE_MAXSIZE = 50,000`, `queue.buffering.max.kbytes = 64 MiB`,
    `_IN_FLIGHT_HIGH_WATER = 1,000`) and says the window's *size* is not established here. Note that
