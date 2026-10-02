@@ -1,8 +1,29 @@
 """T5 dead-letter queue.
 
-The DLQ carries the POST-encryption event (plan C3). Writing the
-pre-encryption payload would make the DLQ a plaintext PII store on a second
-Kafka topic, and re-injecting such an event would double-encrypt it.
+**The DLQ carries two different payload shapes, and saying otherwise is a lie an
+operator acts on.** This module's docstring used to claim the DLQ always carries
+the post-encryption event. It does not, and the reason is the stage that rejected
+the event:
+
+* Rejected **after** the encrypt stage (an event that was encrypted and then
+  crossed the size limit): the payload is the ENCRYPTED event. A plaintext payload
+  there would make the DLQ a second PII store on a second topic, and a replayed
+  record would arrive already carrying ciphertext to be encrypted again.
+* Rejected **during** validation: the event was never encrypted, so the only
+  payload that exists is the plaintext request element. There is nothing else it
+  could carry. Encrypting a record we have already judged invalid would be work
+  spent on a dead event, and redacting it would leave an operator holding a DLQ
+  record they cannot diagnose.
+
+So **a validation-stage DLQ record does contain plaintext PII.** That is a
+consequence of the pipeline order (plan D6, stage 4 before stage 5) and it is
+accepted deliberately -- see the reasoning at `app/ingest/pipeline.py` stage 7 --
+but it must be stated, because "the DLQ never holds plaintext" is exactly the kind
+of claim an auditor will check and exactly the kind that turns out to be false.
+`dlq_data_to_ingress` is the other half of the same fact: it round-trips each shape
+to the struct it was stored as, so a validate-stage record comes back as an
+`IngressEvent` and is encrypted exactly once on re-injection, while an
+encrypt-stage record comes back as a `CloudEvent` and must not be re-encrypted.
 
 `error_context` never carries the offending value.
 """
@@ -75,7 +96,15 @@ def build_dlq_event(
     original_partition: int | None = None,
     original_offset: int | None = None,
 ) -> DlqEvent:
-    """Wrap a rejected event. `rejected_payload` must already be encrypted."""
+    """Wrap a rejected event.
+
+    `rejected_payload` is the payload **in the shape the rejection left it in** --
+    an encrypted `CloudEvent` for a rejection after the encrypt stage, the
+    plaintext request element for one during validation. See the module docstring
+    for why both exist and what the plaintext case implies; this function does not
+    encrypt, redact or transform it, because doing either would break the replay
+    path `dlq_data_to_ingress` implements.
+    """
     source = rejected_payload.get("source")
     if not isinstance(source, str) or not source.startswith("/careers/"):
         # A malformed source must not propagate as if it were a tenant.

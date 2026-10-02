@@ -668,8 +668,13 @@ class Metrics:
             _Family(
                 f"{ns}_buffer_utilisation",
                 "gauge",
-                "Producer queue buffer utilisation, 0..1. The signal that a full queue "
-                "is about to turn into 503s.",
+                "Un-acked records divided by gateway_buffer_items_max. Can exceed 1: "
+                "the numerator counts records anywhere in the un-acked set, including "
+                "ones librdkafka has already taken off the Python queue, while the "
+                "denominator is only the Python queue's capacity. 1 is therefore not "
+                "the 503 point -- a full Python queue refuses a sink() with 503 while "
+                "this still reads under 1. Watch it rising toward and past 1 as the "
+                "trend; alert on gateway_buffer_items against its max instead.",
                 w,
                 self._buffer_utilisation,
                 always=(self._worker_key,),

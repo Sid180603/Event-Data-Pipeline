@@ -73,8 +73,11 @@ _SHUTDOWN_DRAIN_SECONDS = 10.0
 _FLUSH_TIMEOUT_SECONDS = 5.0
 
 #: Gauge publication interval. `set_buffer_usage` takes the registry lock and
-#: writes three series; doing that per event would spend real CPU at 50k
-#: events/sec on a number that is sampled, not continuous.
+#: writes three series; doing that per event would spend real CPU proportional to
+#: the event rate on a number that is sampled, not continuous. The cost scales
+#: with throughput, which is why it is amortised rather than done per record --
+#: and the rate it matters at is whatever this deployment actually does, not a
+#: figure anyone has claimed.
 _USAGE_INTERVAL_SECONDS = 0.25
 
 
