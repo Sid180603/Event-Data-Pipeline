@@ -760,3 +760,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         sleeper=time.sleep,
         stamp=_wall_stamp,
     ).run()
+
+
+if __name__ == "__main__":
+    # The block that makes `python -m tools.observe` -- what `make observe` and
+    # `make demo` run -- do anything at all. Without it the module imports
+    # cleanly, `main()` is never called, and the command exits 0 having printed
+    # nothing: a blank demo screen that reports success. Pinned by
+    # `test_the_module_is_runnable_as_the_command_the_makefile_calls`.
+    raise SystemExit(main())

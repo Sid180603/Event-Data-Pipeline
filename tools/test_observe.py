@@ -31,6 +31,7 @@ import http.server
 import pathlib
 import re
 import socket
+import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -52,6 +53,60 @@ from tools.observe import (
 )
 
 SOURCE = pathlib.Path(__file__).with_name("observe.py")
+
+#: The repo root, which is what `python -m` needs on the path.
+REPO = pathlib.Path(__file__).resolve().parents[1]
+
+
+def test_the_module_is_runnable_as_the_command_the_makefile_calls():
+    """`python -m tools.observe` is how `make observe` and `make demo` invoke it.
+
+    Without an `if __name__ == "__main__"` block the import succeeds, `main()` is
+    never called, and the command prints NOTHING and exits 0. That is the worst
+    shape a broken tool can have: a demo beat 2 screen that is blank while the
+    script reports success, and no error anywhere to trace. Every other entry
+    point in this repo has the guard -- this one did not, and 47 tests here
+    imported `main` and called it directly, so none of them could see it.
+
+    Run as a subprocess on purpose. Calling `main()` in-process would exercise the
+    function and say nothing about whether the module is reachable as a command.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "tools.observe", "--help"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout, (
+        "`python -m tools.observe` exited 0 having printed nothing: the module has "
+        "no __main__ guard, so main() is never called"
+    )
+
+
+def test_every_module_invoked_as_a_command_has_an_entry_point():
+    """The same defect anywhere else, caught in one place.
+
+    The Makefile and the demo runbook reach these by `python -m`, which is a
+    convention nothing enforces. A module missing the guard is inert, not loud,
+    so only running it can tell.
+    """
+    entry_points = [
+        "tools/observe.py",
+        "tools/verify.py",
+        "app/inspect.py",
+        "driver/main.py",
+        "driver/inject.py",
+        "bench/load.py",
+        "contracts/gen_schema.py",
+    ]
+    for relative in entry_points:
+        text = (REPO / relative).read_text(encoding="utf-8")
+        assert '__name__ == "__main__"' in text, (
+            f"{relative} is invoked as `python -m` but has no __main__ guard, so it "
+            "exits 0 without doing anything"
+        )
 
 
 # --- the gateway, as the tool will meet it -----------------------------------
