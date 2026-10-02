@@ -1,8 +1,11 @@
 """T5: the ingestion gateway's request path.
 
 `decode -> auth -> validate -> encrypt -> produce`, and the DLQ carries the
-post-encryption event. See `app/ingest/pipeline.py` for why that order is
-load-bearing, and `app/ingest/limits.py` for why the caps run before allocation.
+post-encryption event **except** for a rejection raised during validation, where
+the event was never encrypted and the DLQ holds the plaintext request element
+deliberately. See `app/ingest/pipeline.py` for why that order is load-bearing and
+what the exception implies, and `app/ingest/limits.py` for why the caps run
+before allocation.
 
 The Kafka sink is injected (`Sink`), never imported: `app/kafka` is a separate
 owner's module, and importing it here would put two owners in one file.

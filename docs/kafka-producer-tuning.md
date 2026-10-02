@@ -81,7 +81,7 @@ inventing one.
 | `retries` | `2_147_483_647` | No rationale is given in the code. It is `INT32_MAX`: retry effectively forever, and let `message.timeout.ms` end it. | `retries=0` with idempotence is rejected outright by this librdkafka (measured). Lowering it below `INT32_MAX` trades "give up only on the timeout" for "give up sooner", which turns a transient broker blip into a failed produce. |
 | `max.in.flight.requests.per.connection` | `5` | No rationale is given in the code. It is the largest value that still preserves ordering under idempotent retries, so it is set rather than inherited. | `6` or more with idempotence is rejected outright by this librdkafka (measured). Lowering it to 1 serialises per-connection and trades throughput for the same ordering guarantee. |
 | `compression.type` | `"zstd"` | No rationale in the producer config. Compression happens client-side, before the produce request, which is why it is set here and not left to the topic. `docker-compose.yml` also sets `compression.type=zstd` on both topics at creation, so the topic and the client state the same intent. | Setting it to `none` makes every request bigger on the wire and on the log, and leaves the topic's `zstd` config describing something no producer is using. It changes bytes, not ordering and not dedup. |
-| `compression.zstd.level` | `3` | **This value does not work.** See the finding below. | — |
+| `compression.level` | `3` | No rationale in the producer config. It is the compression level this librdkafka build has, and it is **not** codec-scoped: one knob covers every codec, and the two spellings of the codec itself (`compression.type` and `compression.codec`) are accepted as aliases. The name that reads correctly — `compression.zstd.level` — is not a property at all, and publishing it made the whole config unconstructable. See the finding below; the fix is in `app/config.py` and the guard is `test_every_published_key_is_a_property_librdkafka_has`. | **[GAP: it is not established here that level 3 is the intended trade — a lower level spends less CPU on compression and sends more bytes, and no broker was available to observe the difference against these topics.]** What is established is that the value is accepted by the library, which the previous spelling was not. |
 | `batch.size` | `262_144` (256 KiB) | No rationale in the producer config. `app/metrics.py`'s `KAFKA_PRODUCE_LATENCY_BUCKETS` docstring notes the produce-latency histogram's top bucket is `5.0`, "comfortably past `message.timeout.ms`". | It is the *upper* bound on one produce request, not a latency setting: a request goes out when either `batch.size` bytes have accumulated or `linger.ms` has elapsed, so the smallest possible produce latency is set by `linger.ms` alone. Raising this only lets requests grow under heavy traffic — and raises the chance of one exceeding the broker's `message.max.bytes`. |
 | `linger.ms` | `10` | `app/kafka/producer.py`: `_IDLE_POLL_SECONDS` "Kept at `linger.ms` (10 ms, in the producer config): the client batches for up to that long anyway, so a longer poll interval here would add its own delay to every record that arrives while the queue is empty, and make the produce-latency histogram measure this loop rather than the broker." | Raising it past 10 ms without raising `_IDLE_POLL_SECONDS` reintroduces exactly that: the owner thread's poll would be the thing the produce-latency histogram is measuring. The two are coupled. |
 | `queue.buffering.max.kbytes` | `65_536` (64 MiB) | `app/kafka/producer.py`: without `_IN_FLIGHT_HIGH_WATER`, "the Python queue drains into librdkafka's queue (capped at `queue.buffering.max.kbytes`, which is bytes, not records) and the process grows to whatever the broker's failure mode allows." | Raising it raises a worker's worst-case RSS by roughly the same amount. Lowering it below the working set turns into produce failures, not a smaller footprint. |
@@ -89,7 +89,11 @@ inventing one.
 | `queuing.strategy` | `"fifo"` | No rationale in the producer config. It fixes the order in which the local queue hands records to the sender, which `enable.idempotence` alone does not: idempotence makes a *retry* safe, it does not stop the queue from handing records over out of production order. | Setting it to `"lifo"` reorders the stream within a partition while raising nothing and duplicating nothing — the worst kind of breakage, because nothing counts it. That is why it is pinned rather than inherited. |
 | `partitioner` | `"consistent_random"` | The inline comment: `hashes the key we supply`. The key is `contracts.attributes.derive_kafka_key` = `f"{career_site_id}|{user_id_pseudo}"`, computed by the gateway; a client-supplied `partitionkey` is never used for routing. | Changing it breaks the mechanism the ordering claim rests on: one `(tenant, user)` pair must land on one partition so a sticky-routed user stays on one consumer. |
 
-### Finding: `compression.zstd.level` is not a librdkafka property
+### Finding (FIXED): `compression.zstd.level` is not a librdkafka property
+
+**This was a demo-day killer and it is now fixed.** It is kept here because the
+reason it survived so long is the reason it is worth recording: nothing in the
+suite ever asked the library whether it understood our property names.
 
 Measured on the installed library, by constructing one `confluent_kafka.Producer`
 per value:
@@ -101,7 +105,7 @@ for k, v in kafka_producer_config("localhost:9092", "event-gateway").items():
     Producer({"bootstrap.servers": "localhost:9092", k: v})
 ```
 
-Twelve of the thirteen values are accepted. One raises:
+Thirteen of the fourteen values were accepted. One raised:
 
 ```
 REJECT  compression.zstd.level = 3
@@ -109,10 +113,11 @@ REJECT  compression.zstd.level = 3
                       str='No such configuration property: "compression.zstd.level"'}
 ```
 
-So `kafka_producer_config()`'s output **cannot be handed to `Producer()` at all**
-in this environment: the whole dict fails, not just the one key. `librdkafka`'s
-codec property is `compression.codec`, and `compression.type` is accepted as its
-alias — a separate `debug=conf` probe setting `compression.type=zstd` and
+So `kafka_producer_config()`'s output **could not be handed to `Producer()` at
+all** in this environment: the whole dict failed, not just the one key, and
+`docker compose up gateway` would have died at startup. `librdkafka`'s codec
+property is `compression.codec`, and `compression.type` is accepted as its alias
+— a separate `debug=conf` probe setting `compression.type=zstd` and
 `compression.level=3` dumped:
 
 ```
@@ -126,15 +131,25 @@ alias — a separate `debug=conf` probe setting `compression.type=zstd` and
 So `compression.level` is the level property this library has, and it lives in a
 different namespace (`Default topic configuration:`) from the codec. The two
 alternative spellings `zstd.level` and `zstd.compression.level` are also
-rejected.
+rejected. Note the level knob is **not** codec-scoped, which is the part that
+makes `compression.zstd.level` so plausible and so wrong.
 
-This is reported, not fixed: `app/config.py` is not this task's file, and
-changing a D11 value is a decision for whoever owns D11. The likely one-line fix
-is `compression.zstd.level` → `compression.level`, but **[GAP: it has not been
-verified that `compression.level=3` alongside `compression.type=zstd` is what
-was intended, nor what a different zstd level would do to the topics]**, and no
-broker is running here to observe either. What *is* verified is the current
-state: the shipped dict is rejected at construction.
+**Fixed** in `app/config.py`: the key is now `compression.level`. Two tests now
+guard it, both of which build a real client — `test_the_gateway_can_actually_construct_a_producer`
+for the invariant that matters, and `test_every_published_key_is_a_property_librdkafka_has`
+to name an offending key. Constructing a `Producer` needs no broker, so this is
+checkable in CI.
+
+**Why it survived:** the existing config test asserted the dict equalled
+`app.config`'s own output, using a stub producer. That is a tautology — it passes
+whether or not librdkafka has ever heard of a key. Asserting that a config is the
+config you meant to write is not the same as asserting the library accepts it, and
+only the second one is load-bearing.
+
+**[GAP: it is still not established that level 3 is the intended trade.** A lower
+level spends less CPU on compression and sends more bytes, and no broker was
+available here to observe either against these topics. What is established is that
+the value is accepted.
 
 ## The module constants, which are the other half of the tuning story
 
@@ -341,7 +356,13 @@ rather than the Java client whose defaults were researched."*
   `compression.codec` exists as a real property. The Java client has no
   `compression.codec`. So a Java-flavoured doc is describing a name that here is
   only an alias, and `compression.zstd.level` is a name that does not exist at
-  all (see the finding above).
+  all (see the finding above — the config shipped that name for the life of the
+  project, and `Producer()` rejected the whole dict because of it).
+* **The level knob is not codec-scoped.** One `compression.level` covers every
+  codec, and it resolves under `Default topic configuration:` rather than
+  `Client configuration:`. This is worth internalising before touching any
+  Java-flavoured snippet: the Java client exposes per-codec level properties, so
+  the natural transliteration of one into the other does not exist here at all.
 * **The timeout property is named differently, and both names exist here.**
   `message.timeout.ms` is the librdkafka spelling (which is why the code pins it
   with the comment `not delivery.timeout.ms: librdkafka name`); the Java client's

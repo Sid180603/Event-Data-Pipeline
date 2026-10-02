@@ -445,7 +445,7 @@ def test_an_unknown_top_level_attribute_is_named_in_the_reason(issuer, verifier,
 
 
 # =============================================================================
-# 4. the DLQ payload is the POST-encryption event
+# 4. the DLQ payload is post-encryption, except for a validation-stage rejection
 # =============================================================================
 
 
@@ -863,7 +863,7 @@ def test_the_published_examples_are_the_INGRESS_shape(issuer, verifier, tenants,
     ALREADY holding `*_enc` -- the *Kafka* shape. A client cannot hold a tenant
     key, so its request shape is the plaintext one, and those events were refused
     with `SCHEMA at $.data.candidate`. That meant the driver could not drive load
-    at all, and T11's `sent == accepted == stored` could never reconcile.
+    at all, and a `sent == accepted == stored` reconciliation could never balance.
 
     Fixed by publishing `contracts/ingress.py` and regenerating both. This test
     is the guard: the published examples must ACCEPT, and the produced event must

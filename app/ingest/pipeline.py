@@ -6,10 +6,14 @@ That order is load-bearing, and three separate guarantees fall out of it:
   disclosed or written anywhere** (D4). A rejection is a fact about one tenant's
   data, so an unauthenticated caller must not be able to learn it, and must not
   be able to make us write a DLQ record.
-* **Encryption happens after validation and before production**, so the record
-  that reaches `career.events.raw` and the record that reaches `career.events.dlq`
-  are both post-encryption. The DLQ is therefore not a second plaintext PII
-  store, and a replayed DLQ record is not double-encrypted (C3).
+* **Encryption happens after validation and before production**, which is what
+  makes a replayed DLQ record safe: a DLQ entry that was written after the encrypt
+  stage carries the encrypted event, and re-injecting it does not double-encrypt.
+  **A DLQ entry written by a validation-stage rejection is the exception** — that
+  event was never encrypted, so the record holds the plaintext request element,
+  deliberately (see stage 7 for the reasoning). So the DLQ is not a second
+  plaintext PII store *by construction*; it is one for the class of events that
+  were rejected before there was anything to encrypt (C3).
 * **The final size check runs on the encrypted event** (G2), because that is the
   one that has to fit inside a Kafka message.
 
@@ -77,8 +81,9 @@ REASON_DLQ_UNAVAILABLE = "DLQ_UNAVAILABLE"
 
 #: What a 202 actually asserts. Deliberately not a durability claim: the events
 #: are in the producer's bounded in-memory buffer, and a process killed
-#: mid-flight loses the un-acked window. That window is measured in T11, not
-#: denied here.
+#: mid-flight loses the un-acked window. That window is measured by
+#: `scripts/chaos/kill_gateway.sh` and reconciled with `python -m tools.verify`,
+#: not denied here.
 DURABILITY_ACCEPTED_INTO_BUFFER = "accepted-into-buffer"
 
 
@@ -321,11 +326,16 @@ def ingest_batch(
     to make: `NotABatch` (400), `Unauthorized` (401), `Forbidden` (403),
     `PayloadTooLarge` (413), `RateLimited` (429), `SinkUnavailable` (503).
 
-    `max_event_bytes` is injectable because the ingress cap makes
-    `MAX_EVENT_BYTES` unreachable by construction -- 48 KiB of plaintext becomes
-    at most ~64 KiB of base64 -- so the post-encryption check is a belt-and-braces
-    defence that only bites if `INGRESS_EVENT_BYTES` is raised. A defence that
-    cannot be reached cannot be tested, and an untested size limit is a comment.
+    `max_event_bytes` is injectable because the post-encryption check is NOT
+    unreachable, which this docstring used to claim. It was wrong: measured by
+    `app/test_config.py`, a 48 KiB ingress event whose bulk sits in the five
+    encrypted PII fields inflates to 65,923 B -- 387 B over `MAX_EVENT_BYTES` --
+    and is refused here. The claim holds only for an event whose bulk sits in a
+    field nothing encrypts, which then crosses at 49,380 B with 16 KB to spare.
+    So this check is a live defence that fires on a client filling every candidate
+    field to the cap, and the top 297 B of `INGRESS_EVENT_BYTES` is a dead zone:
+    admitted by the ingress size check, refused here, per-event, to the DLQ. It
+    is injectable so that boundary is testable rather than argued about.
     """
     # --- 1. limits, before any per-event work or allocation --------------------
     items = split_limited_batch(raw)
